@@ -198,6 +198,13 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 	// starting the process. This creates a veth pair, attaches it to
 	// the host bridge, installs routes, and sets up portmap DNAT rules.
 	if spec.GetNetworkMode() == capsulev1.NetworkMode_NETWORK_MODE_BRIDGE {
+		// Best-effort clear of any IPAM allocation left by a prior
+		// crashed attempt. CNI's host-local IPAM tracks by container
+		// name, and if the previous cniSetup partially succeeded (e.g.
+		// bridge assigned an IP but loopback failed), the next attempt
+		// gets "duplicate allocation is not allowed". Teardown is safe
+		// when nothing is there.
+		_ = d.cniTeardown(ctx, name, task.Pid())
 		if err := d.cniSetup(ctx, name, task.Pid(), spec.GetPorts()); err != nil {
 			_, _ = task.Delete(ctx, containerd.WithProcessKill)
 			_ = container.Delete(ctx, containerd.WithSnapshotCleanup)

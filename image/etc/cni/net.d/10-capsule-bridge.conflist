@@ -1,10 +1,10 @@
 {
   "cniVersion": "1.0.0",
-  "name": "keel-bridge",
+  "name": "capsule-bridge",
   "plugins": [
     {
       "type": "bridge",
-      "bridge": "br-keel",
+      "bridge": "br0",
       "isGateway": true,
       "isDefaultGateway": true,
       "ipMasq": true,
@@ -12,7 +12,12 @@
       "ipam": {
         "type": "host-local",
         "dataDir": "/run/cni/ipam",
-        "ranges": [[{"subnet": "172.20.0.0/16", "gateway": "172.20.0.1"}]]
+        "ranges": [[{
+          "subnet": "172.20.0.0/16",
+          "rangeStart": "172.20.0.2",
+          "rangeEnd": "172.20.0.254",
+          "gateway": "172.20.0.1"
+        }]]
       }
     },
     {
