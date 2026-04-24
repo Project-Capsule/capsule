@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	CapsuleService_GetInfo_FullMethodName = "/capsule.v1.CapsuleService/GetInfo"
+	CapsuleService_GetInfo_FullMethodName    = "/capsule.v1.CapsuleService/GetInfo"
+	CapsuleService_StreamLogs_FullMethodName = "/capsule.v1.CapsuleService/StreamLogs"
 )
 
 // CapsuleServiceClient is the client API for CapsuleService service.
@@ -31,6 +32,10 @@ const (
 type CapsuleServiceClient interface {
 	// GetInfo returns identity and runtime information about this capsule.
 	GetInfo(ctx context.Context, in *GetInfoRequest, opts ...grpc.CallOption) (*GetInfoResponse, error)
+	// StreamLogs streams the capsuled daemon's own log output (slog).
+	// This is the host-side log — boot, reconciler ticks, runtime driver
+	// events. Separate from workload logs, which go via WorkloadService.Logs.
+	StreamLogs(ctx context.Context, in *CapsuleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[CapsuleLogChunk], error)
 }
 
 type capsuleServiceClient struct {
@@ -51,6 +56,25 @@ func (c *capsuleServiceClient) GetInfo(ctx context.Context, in *GetInfoRequest, 
 	return out, nil
 }
 
+func (c *capsuleServiceClient) StreamLogs(ctx context.Context, in *CapsuleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[CapsuleLogChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &CapsuleService_ServiceDesc.Streams[0], CapsuleService_StreamLogs_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[CapsuleLogsRequest, CapsuleLogChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CapsuleService_StreamLogsClient = grpc.ServerStreamingClient[CapsuleLogChunk]
+
 // CapsuleServiceServer is the server API for CapsuleService service.
 // All implementations must embed UnimplementedCapsuleServiceServer
 // for forward compatibility.
@@ -60,6 +84,10 @@ func (c *capsuleServiceClient) GetInfo(ctx context.Context, in *GetInfoRequest, 
 type CapsuleServiceServer interface {
 	// GetInfo returns identity and runtime information about this capsule.
 	GetInfo(context.Context, *GetInfoRequest) (*GetInfoResponse, error)
+	// StreamLogs streams the capsuled daemon's own log output (slog).
+	// This is the host-side log — boot, reconciler ticks, runtime driver
+	// events. Separate from workload logs, which go via WorkloadService.Logs.
+	StreamLogs(*CapsuleLogsRequest, grpc.ServerStreamingServer[CapsuleLogChunk]) error
 	mustEmbedUnimplementedCapsuleServiceServer()
 }
 
@@ -72,6 +100,9 @@ type UnimplementedCapsuleServiceServer struct{}
 
 func (UnimplementedCapsuleServiceServer) GetInfo(context.Context, *GetInfoRequest) (*GetInfoResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetInfo not implemented")
+}
+func (UnimplementedCapsuleServiceServer) StreamLogs(*CapsuleLogsRequest, grpc.ServerStreamingServer[CapsuleLogChunk]) error {
+	return status.Error(codes.Unimplemented, "method StreamLogs not implemented")
 }
 func (UnimplementedCapsuleServiceServer) mustEmbedUnimplementedCapsuleServiceServer() {}
 func (UnimplementedCapsuleServiceServer) testEmbeddedByValue()                        {}
@@ -112,6 +143,17 @@ func _CapsuleService_GetInfo_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CapsuleService_StreamLogs_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(CapsuleLogsRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(CapsuleServiceServer).StreamLogs(m, &grpc.GenericServerStream[CapsuleLogsRequest, CapsuleLogChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CapsuleService_StreamLogsServer = grpc.ServerStreamingServer[CapsuleLogChunk]
+
 // CapsuleService_ServiceDesc is the grpc.ServiceDesc for CapsuleService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -124,6 +166,12 @@ var CapsuleService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _CapsuleService_GetInfo_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamLogs",
+			Handler:       _CapsuleService_StreamLogs_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "capsule/v1/capsule.proto",
 }

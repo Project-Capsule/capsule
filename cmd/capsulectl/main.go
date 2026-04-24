@@ -41,6 +41,12 @@ func main() {
 	switch group + " " + cmd {
 	case "capsule info":
 		err = capsuleInfo(*addr)
+	case "capsule logs":
+		fs := flag.NewFlagSet("capsule logs", flag.ExitOnError)
+		follow := fs.Bool("f", false, "stream new output until Ctrl-C")
+		tail := fs.Int("n", 0, "show the last N lines before streaming")
+		_ = fs.Parse(subArgs)
+		err = capsuleLogs(*addr, *follow, *tail)
 	case "workload apply":
 		fs := flag.NewFlagSet("workload apply", flag.ExitOnError)
 		file := fs.String("f", "", "workload manifest file (- for stdin)")
@@ -157,6 +163,7 @@ func usage() {
 
 Usage:
   capsulectl [--capsule host:port] capsule info
+  capsulectl [--capsule host:port] capsule logs [-f] [-n N]
   capsulectl [--capsule host:port] workload apply -f <manifest.yaml>
   capsulectl [--capsule host:port] workload list
   capsulectl [--capsule host:port] workload get <name>
@@ -181,6 +188,47 @@ func withCtx(fn func(ctx context.Context) error) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return fn(ctx)
+}
+
+// --- capsule logs ----------------------------------------------------------
+
+func capsuleLogs(addr string, follow bool, tail int) error {
+	conn, err := dial(addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := capsulev1.NewCapsuleServiceClient(conn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
+
+	stream, err := client.StreamLogs(ctx, &capsulev1.CapsuleLogsRequest{
+		Follow:    follow,
+		TailLines: int32(tail),
+	})
+	if err != nil {
+		return err
+	}
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		_, _ = os.Stdout.Write(chunk.GetData())
+	}
 }
 
 // --- capsule info ----------------------------------------------------------

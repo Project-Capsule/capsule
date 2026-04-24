@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -26,6 +27,11 @@ import (
 
 // version is overridden at build time via -ldflags '-X main.version=...'.
 var version = "dev"
+
+// CapsuleLogPath is where capsuled tees its slog output for
+// CapsuleService.StreamLogs to tail. Lives on tmpfs so it vanishes at
+// reboot; persistent operator logs are a future addition.
+const CapsuleLogPath = "/run/capsule/capsuled.log"
 
 func main() {
 	addr := flag.String("addr", ":50000", "gRPC listen address")
@@ -52,6 +58,20 @@ func main() {
 		go boot.ReapZombies(ctx)
 	}
 
+	// Now that /run is mounted (if PID 1) we can tee slog to a file so
+	// CapsuleService.StreamLogs can tail it. Best-effort: if we can't
+	// open the file we stick with stderr-only (which reaches the
+	// capsule console on PID 1 anyway). We re-set the default handler
+	// here instead of earlier so boot.Init's log lines don't require
+	// /run to be mountable.
+	if err := os.MkdirAll("/run/capsule", 0o755); err == nil {
+		if f, err := os.OpenFile(CapsuleLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+			tee := io.MultiWriter(os.Stderr, f)
+			slog.SetDefault(slog.New(slog.NewTextHandler(tee, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			slog.Info("capsule log tee", "path", CapsuleLogPath)
+		}
+	}
+
 	if isPID1 && bootResult.MountedPerm {
 		if err := os.MkdirAll("/run/containerd", 0o711); err != nil {
 			slog.Error("mkdir /run/containerd", "err", err)
@@ -66,6 +86,7 @@ func main() {
 	}
 
 	capsuleCtl := &controllers.CapsuleController{
+		LogPath:        CapsuleLogPath,
 		CapsuleVersion: version,
 	}
 

@@ -156,6 +156,106 @@ func (x *GetInfoResponse) GetActiveSlot() string {
 	return ""
 }
 
+type CapsuleLogsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// If true, keep the stream open and emit new log lines as they arrive.
+	Follow bool `protobuf:"varint,1,opt,name=follow,proto3" json:"follow,omitempty"`
+	// Return only the last N lines from the existing log before streaming.
+	// 0 = from the start of the file.
+	TailLines     int32 `protobuf:"varint,2,opt,name=tail_lines,json=tailLines,proto3" json:"tail_lines,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CapsuleLogsRequest) Reset() {
+	*x = CapsuleLogsRequest{}
+	mi := &file_capsule_v1_capsule_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CapsuleLogsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CapsuleLogsRequest) ProtoMessage() {}
+
+func (x *CapsuleLogsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_capsule_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CapsuleLogsRequest.ProtoReflect.Descriptor instead.
+func (*CapsuleLogsRequest) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_capsule_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *CapsuleLogsRequest) GetFollow() bool {
+	if x != nil {
+		return x.Follow
+	}
+	return false
+}
+
+func (x *CapsuleLogsRequest) GetTailLines() int32 {
+	if x != nil {
+		return x.TailLines
+	}
+	return 0
+}
+
+type CapsuleLogChunk struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Raw log bytes. Line framing is preserved but not guaranteed.
+	Data          []byte `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CapsuleLogChunk) Reset() {
+	*x = CapsuleLogChunk{}
+	mi := &file_capsule_v1_capsule_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CapsuleLogChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CapsuleLogChunk) ProtoMessage() {}
+
+func (x *CapsuleLogChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_capsule_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CapsuleLogChunk.ProtoReflect.Descriptor instead.
+func (*CapsuleLogChunk) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_capsule_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *CapsuleLogChunk) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
 var File_capsule_v1_capsule_proto protoreflect.FileDescriptor
 
 const file_capsule_v1_capsule_proto_rawDesc = "" +
@@ -171,9 +271,17 @@ const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\x0euptime_seconds\x18\x05 \x01(\x04R\ruptimeSeconds\x12'\n" +
 	"\x0fcapsule_version\x18\x06 \x01(\tR\x0ecapsuleVersion\x12\x1f\n" +
 	"\vactive_slot\x18\a \x01(\tR\n" +
-	"activeSlot2T\n" +
+	"activeSlot\"K\n" +
+	"\x12CapsuleLogsRequest\x12\x16\n" +
+	"\x06follow\x18\x01 \x01(\bR\x06follow\x12\x1d\n" +
+	"\n" +
+	"tail_lines\x18\x02 \x01(\x05R\ttailLines\"%\n" +
+	"\x0fCapsuleLogChunk\x12\x12\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data2\xa1\x01\n" +
 	"\x0eCapsuleService\x12B\n" +
-	"\aGetInfo\x12\x1a.capsule.v1.GetInfoRequest\x1a\x1b.capsule.v1.GetInfoResponseB\xa5\x01\n" +
+	"\aGetInfo\x12\x1a.capsule.v1.GetInfoRequest\x1a\x1b.capsule.v1.GetInfoResponse\x12K\n" +
+	"\n" +
+	"StreamLogs\x12\x1e.capsule.v1.CapsuleLogsRequest\x1a\x1b.capsule.v1.CapsuleLogChunk0\x01B\xa5\x01\n" +
 	"\x0ecom.capsule.v1B\fCapsuleProtoP\x01Z<github.com/geekgonecrazy/capsule/models/capsule/v1;capsulev1\xa2\x02\x03CXX\xaa\x02\n" +
 	"Capsule.V1\xca\x02\n" +
 	"Capsule\\V1\xe2\x02\x16Capsule\\V1\\GPBMetadata\xea\x02\vCapsule::V1b\x06proto3"
@@ -190,16 +298,20 @@ func file_capsule_v1_capsule_proto_rawDescGZIP() []byte {
 	return file_capsule_v1_capsule_proto_rawDescData
 }
 
-var file_capsule_v1_capsule_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_capsule_v1_capsule_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_capsule_v1_capsule_proto_goTypes = []any{
-	(*GetInfoRequest)(nil),  // 0: capsule.v1.GetInfoRequest
-	(*GetInfoResponse)(nil), // 1: capsule.v1.GetInfoResponse
+	(*GetInfoRequest)(nil),     // 0: capsule.v1.GetInfoRequest
+	(*GetInfoResponse)(nil),    // 1: capsule.v1.GetInfoResponse
+	(*CapsuleLogsRequest)(nil), // 2: capsule.v1.CapsuleLogsRequest
+	(*CapsuleLogChunk)(nil),    // 3: capsule.v1.CapsuleLogChunk
 }
 var file_capsule_v1_capsule_proto_depIdxs = []int32{
 	0, // 0: capsule.v1.CapsuleService.GetInfo:input_type -> capsule.v1.GetInfoRequest
-	1, // 1: capsule.v1.CapsuleService.GetInfo:output_type -> capsule.v1.GetInfoResponse
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
+	2, // 1: capsule.v1.CapsuleService.StreamLogs:input_type -> capsule.v1.CapsuleLogsRequest
+	1, // 2: capsule.v1.CapsuleService.GetInfo:output_type -> capsule.v1.GetInfoResponse
+	3, // 3: capsule.v1.CapsuleService.StreamLogs:output_type -> capsule.v1.CapsuleLogChunk
+	2, // [2:4] is the sub-list for method output_type
+	0, // [0:2] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -216,7 +328,7 @@ func file_capsule_v1_capsule_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_capsule_v1_capsule_proto_rawDesc), len(file_capsule_v1_capsule_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

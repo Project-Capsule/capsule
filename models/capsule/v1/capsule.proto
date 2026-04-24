@@ -7,6 +7,10 @@ package capsule.v1;
 service CapsuleService {
   // GetInfo returns identity and runtime information about this capsule.
   rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+  // StreamLogs streams the capsuled daemon's own log output (slog).
+  // This is the host-side log — boot, reconciler ticks, runtime driver
+  // events. Separate from workload logs, which go via WorkloadService.Logs.
+  rpc StreamLogs(CapsuleLogsRequest) returns (stream CapsuleLogChunk);
 }
 
 message GetInfoRequest {}
@@ -26,4 +30,17 @@ message GetInfoResponse {
   string capsule_version = 6;
   // Which A/B slot is currently active. Empty string until A/B updates ship.
   string active_slot = 7;
+}
+
+message CapsuleLogsRequest {
+  // If true, keep the stream open and emit new log lines as they arrive.
+  bool follow = 1;
+  // Return only the last N lines from the existing log before streaming.
+  // 0 = from the start of the file.
+  int32 tail_lines = 2;
+}
+
+message CapsuleLogChunk {
+  // Raw log bytes. Line framing is preserved but not guaranteed.
+  bytes data = 1;
 }
