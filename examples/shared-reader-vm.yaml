@@ -1,0 +1,19 @@
+name: shared-reader
+kind: MicroVM
+microVm:
+  image: docker.io/library/alpine:3.20
+  vcpus: 1
+  memoryMib: 256
+  command: ["/bin/sh", "-xc"]
+  args:
+    - |
+      df -h /data
+      echo --- READING ---
+      cat /data/greeting.txt
+      echo --- APPENDING ---
+      echo from-vm-reader >> /data/greeting.txt
+      cat /data/greeting.txt
+      sleep 30
+  mounts:
+    - volumeName: shared
+      mountPath: /data

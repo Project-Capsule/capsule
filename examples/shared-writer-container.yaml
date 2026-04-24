@@ -1,0 +1,16 @@
+name: shared-writer
+kind: Container
+container:
+  image: docker.io/library/alpine:3.20
+  command: ["/bin/sh", "-xc"]
+  args:
+    - |
+      df -h /data
+      echo from-container > /data/greeting.txt
+      echo second-line >> /data/greeting.txt
+      ls -la /data
+      date
+      sleep 15
+  mounts:
+    - volumeName: shared
+      mountPath: /data
