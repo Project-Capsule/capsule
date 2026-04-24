@@ -1,0 +1,11 @@
+name: alpine-vm
+kind: MicroVM
+microVm:
+  image: docker.io/library/alpine:3.20
+  vcpus: 1
+  memoryMib: 256
+  # Override the image's default entrypoint (which is /bin/sh with no TTY)
+  # with a simple loop that prints time so we can verify the VM is alive
+  # via the Firecracker serial console.
+  command: ["/bin/sh", "-c"]
+  args: ["while :; do date; sleep 5; done"]

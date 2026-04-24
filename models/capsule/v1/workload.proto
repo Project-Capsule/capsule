@@ -1,0 +1,258 @@
+syntax = "proto3";
+
+package capsule.v1;
+
+// WorkloadService manages the declarative workload set on a capsule.
+// A Workload is either a Container or a MicroVM; both share one envelope.
+service WorkloadService {
+  rpc Apply(WorkloadApplyRequest) returns (WorkloadApplyResponse);
+  rpc Get(WorkloadGetRequest) returns (Workload);
+  rpc List(WorkloadListRequest) returns (WorkloadListResponse);
+  rpc Delete(WorkloadDeleteRequest) returns (WorkloadDeleteResponse);
+  // Logs streams combined stdout+stderr from a running (or recently
+  // running) workload. Stops when the client cancels, or when the
+  // workload is removed and follow=false.
+  rpc Logs(WorkloadLogsRequest) returns (stream WorkloadLogChunk);
+  // Exec runs a one-shot process inside an already-running workload.
+  // The first client message MUST be WorkloadExecClientMessage.config; subsequent
+  // messages carry stdin bytes or PTY resize events. The server streams
+  // stdout/stderr and finally an Exit message before closing.
+  rpc Exec(stream WorkloadExecClientMessage) returns (stream WorkloadExecServerMessage);
+  // Restart tears down the runtime state for a workload; the reconciler
+  // recreates it on the next tick. Desired state is unchanged (still
+  // RUNNING). Use for "I think it's wedged, bounce it".
+  rpc Restart(WorkloadRestartRequest) returns (WorkloadRestartResponse);
+  // Stop sets the workload's desired state to STOPPED and tears down
+  // its runtime state. The reconciler will NOT recreate it until Start
+  // is called. Spec is preserved; survives capsule reboot.
+  rpc Stop(WorkloadStopRequest) returns (WorkloadStopResponse);
+  // Start sets desired state back to RUNNING; the reconciler picks it
+  // up and brings the workload back.
+  rpc Start(WorkloadStartRequest) returns (WorkloadStartResponse);
+}
+
+enum DesiredState {
+  DESIRED_STATE_UNSPECIFIED = 0; // treated as RUNNING
+  DESIRED_STATE_RUNNING = 1;
+  DESIRED_STATE_STOPPED = 2;
+}
+
+enum WorkloadKind {
+  WORKLOAD_KIND_UNSPECIFIED = 0;
+  WORKLOAD_KIND_CONTAINER = 1;
+  WORKLOAD_KIND_MICRO_VM = 2;
+}
+
+enum WorkloadPhase {
+  WORKLOAD_PHASE_UNSPECIFIED = 0;
+  WORKLOAD_PHASE_PENDING = 1;
+  WORKLOAD_PHASE_RUNNING = 2;
+  WORKLOAD_PHASE_FAILED = 3;
+  WORKLOAD_PHASE_STOPPED = 4;
+}
+
+message Workload {
+  string name = 1;
+  WorkloadKind kind = 2;
+  ContainerSpec container = 3;
+  MicroVMSpec micro_vm = 4;
+  WorkloadStatus status = 5;
+  // Desired state. UNSPECIFIED is treated as RUNNING (default for
+  // freshly-applied workloads). Set to STOPPED via the Stop RPC; that
+  // tells the reconciler to tear down the workload and leave it down
+  // until Start. Preserved across capsule reboots.
+  DesiredState desired_state = 6;
+}
+
+message ContainerSpec {
+  string image = 1;
+  repeated string command = 2;
+  repeated string args = 3;
+  map<string, string> env = 4;
+  repeated VolumeMount mounts = 5;
+  // Network mode. UNSPECIFIED defaults to a private netns with only
+  // loopback (the container can talk to itself and nothing else).
+  NetworkMode network_mode = 6;
+  // Port mappings. Only meaningful when network_mode == BRIDGE.
+  repeated PortMapping ports = 7;
+}
+
+enum NetworkMode {
+  // Default: private network namespace with only loopback available.
+  NETWORK_MODE_UNSPECIFIED = 0;
+  // Share the host's network namespace. Container binds directly to the
+  // capsule's interfaces. No isolation between container and host.
+  NETWORK_MODE_HOST = 1;
+  // veth pair into a host bridge. Reserved for Phase 2.5 — not yet
+  // implemented by the runtime driver.
+  NETWORK_MODE_BRIDGE = 2;
+}
+
+message PortMapping {
+  // Port inside the container.
+  uint32 container_port = 1;
+  // Port on the host/capsule. 0 means auto-allocate (not yet supported).
+  uint32 host_port = 2;
+  // "tcp" or "udp". Empty defaults to "tcp".
+  string protocol = 3;
+}
+
+message MicroVMSpec {
+  // ---- Image-mode (smolvm-style): easy path ---------------------------
+  // OCI image reference (same shape as ContainerSpec.image). When set,
+  // capsule pulls the image, builds an ext4 rootfs from its layers, injects
+  // capsuled's guest-init as /sbin/init, and boots a Firecracker microVM
+  // using the capsule's bundled shared kernel (/usr/share/capsule/vmlinux).
+  // Mutually exclusive with kernel_path/rootfs_path.
+  string image = 8;
+  // Override the entrypoint declared in the image (like docker --entrypoint).
+  repeated string command = 9;
+  // Args appended to the entrypoint (like docker CMD).
+  repeated string args = 10;
+  // Env vars merged with the image's defaults.
+  map<string, string> env = 11;
+
+  // ---- BYO-kernel mode: advanced / custom -----------------------------
+  // Absolute path on the capsule to a raw Linux kernel image (vmlinux).
+  // Only consulted when `image` is empty.
+  string kernel_path = 1;
+  // Absolute path to an ext4 root filesystem image. Only consulted when
+  // `image` is empty.
+  string rootfs_path = 2;
+
+  // ---- Common ---------------------------------------------------------
+  // Number of vCPUs. Zero defaults to 1.
+  uint32 vcpus = 3;
+  // Guest memory size in MiB. Zero defaults to 256.
+  uint32 memory_mib = 4;
+  // Additional block devices (volumes attached as /dev/vdN to the guest).
+  repeated VolumeMount mounts = 5;
+  // Extra kernel cmdline args appended to Capsule's defaults.
+  string kernel_cmdline_extra = 6;
+  // Backend to run the VM in. UNSPECIFIED defaults to FIRECRACKER.
+  MicroVMBackend backend = 7;
+
+  // Port mappings. Each entry DNATs <host_port> on the capsule to
+  // <container_port> on this VM's internal IP (br0 side).
+  repeated PortMapping ports = 12;
+}
+
+enum MicroVMBackend {
+  MICRO_VM_BACKEND_UNSPECIFIED = 0;
+  MICRO_VM_BACKEND_FIRECRACKER = 1;
+  // SMOLVM is reserved for a future backend driver.
+  MICRO_VM_BACKEND_SMOLVM = 2;
+}
+
+message VolumeMount {
+  string volume_name = 1;
+  string mount_path = 2;
+  bool read_only = 3;
+}
+
+message WorkloadStatus {
+  WorkloadPhase phase = 1;
+  string message = 2;
+  uint32 restart_count = 3;
+}
+
+message WorkloadApplyRequest {
+  Workload workload = 1;
+}
+message WorkloadApplyResponse {
+  Workload workload = 1;
+}
+
+message WorkloadGetRequest {
+  string name = 1;
+}
+
+message WorkloadListRequest {}
+message WorkloadListResponse {
+  repeated Workload workloads = 1;
+}
+
+message WorkloadDeleteRequest {
+  string name = 1;
+}
+message WorkloadDeleteResponse {}
+
+// --- Logs ---
+
+message WorkloadLogsRequest {
+  string name = 1;
+  // follow keeps the stream open and emits new data as it arrives.
+  bool follow = 2;
+  // tail_lines returns only the last N lines from the existing log before
+  // streaming any new data. 0 means "from the start of the file".
+  int32 tail_lines = 3;
+  // source selects which log to stream. PAYLOAD is the application's
+  // combined stdout+stderr (default). SERIAL is the VM's serial console
+  // output — kernel boot, capsule-guest, Firecracker. Only valid for MicroVM
+  // workloads.
+  LogSource source = 4;
+}
+
+enum LogSource {
+  LOG_SOURCE_UNSPECIFIED = 0; // treated as PAYLOAD
+  LOG_SOURCE_PAYLOAD = 1;
+  LOG_SOURCE_SERIAL = 2;
+}
+
+message WorkloadLogChunk {
+  // data is a raw byte slice from the combined stdout+stderr log. Line
+  // framing is preserved but not guaranteed — clients should treat this
+  // as a byte stream.
+  bytes data = 1;
+}
+
+// --- Exec ---
+
+message WorkloadExecClientMessage {
+  oneof payload {
+    WorkloadExecConfig config = 1;
+    bytes stdin = 2;
+    WorkloadExecResize resize = 3;
+  }
+}
+
+message WorkloadExecConfig {
+  // Name of the running workload to exec inside.
+  string name = 1;
+  // Command to run (argv). Required, must have at least one element.
+  repeated string command = 2;
+  // If true, allocate a PTY; server will send stdout only (no stderr
+  // split) and expect resize events.
+  bool tty = 3;
+  // Extra environment variables for the exec'd process. Merged with the
+  // container's default env.
+  map<string, string> env = 4;
+}
+
+message WorkloadExecResize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+message WorkloadExecServerMessage {
+  oneof payload {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    WorkloadExecExit exit = 3;
+  }
+}
+
+message WorkloadExecExit {
+  int32 exit_code = 1;
+}
+
+// --- Restart / Stop / Start ---
+
+message WorkloadRestartRequest { string name = 1; }
+message WorkloadRestartResponse {}
+
+message WorkloadStopRequest { string name = 1; }
+message WorkloadStopResponse {}
+
+message WorkloadStartRequest { string name = 1; }
+message WorkloadStartResponse {}

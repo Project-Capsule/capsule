@@ -1,0 +1,7 @@
+name: debug
+kind: Container
+container:
+  image: docker.io/library/alpine:3.20
+  networkMode: NETWORK_MODE_HOST
+  command: ["/bin/sh", "-c"]
+  args: ["while true; do sleep 60; done"]

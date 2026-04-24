@@ -1,0 +1,136 @@
+syntax = "proto3";
+
+package capsule.v1;
+
+// GuestAgent is the gRPC service exposed by capsule-guest inside every
+// Capsule-managed microVM. capsuled on the host dials it over vsock to drive
+// the VM's lifecycle: start the user payload, stream logs, exec one-off
+// commands, stop it.
+//
+// The agent is PID 1 inside the VM. It owns /proc, /sys, /dev, and
+// handles zombie reaping for the payload tree.
+service GuestAgent {
+  // Ping is a cheap liveness probe. Called by capsuled after VM boot to
+  // detect when the agent is ready before issuing StartPayload.
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // StartPayload mounts the attached payload block device at a known
+  // path, sets env/cwd, and execs the entrypoint as a child process
+  // (so the agent remains PID 1 and can observe it).
+  rpc StartPayload(StartPayloadRequest) returns (StartPayloadResponse);
+
+  // Status returns the observed lifecycle of the currently-running
+  // payload process. Returns UNSPECIFIED if nothing started yet.
+  rpc Status(StatusRequest) returns (StatusResponse);
+
+  // Logs streams combined stdout+stderr of the payload process.
+  // Supports follow and tail-lines semantics like WorkloadService.Logs.
+  rpc Logs(LogsRequest) returns (stream LogChunk);
+
+  // Exec runs a one-shot process in the payload's mount namespace.
+  // Bidi-streaming, mirrors WorkloadService.Exec.
+  rpc Exec(stream ExecClientMessage) returns (stream ExecServerMessage);
+
+  // Stop asks the payload to terminate. Sends SIGTERM, then SIGKILL
+  // after grace_seconds.
+  rpc Stop(StopRequest) returns (StopResponse);
+}
+
+message PingRequest {}
+message PingResponse {
+  // Agent build version baked into capsule-guest.
+  string agent_version = 1;
+  // Seconds since the VM booted (guest uptime).
+  uint64 uptime_seconds = 2;
+}
+
+message StartPayloadRequest {
+  // Block device inside the VM that holds the payload rootfs (ext4).
+  // Almost always "/dev/vdb" in Capsule's layout.
+  string payload_block_device = 1;
+
+  // Command / entrypoint to run (argv). Required.
+  repeated string command = 2;
+  // Environment vars to set, in NAME=VALUE form.
+  repeated string env = 3;
+  // Working directory inside the payload rootfs. Empty means "/".
+  string working_dir = 4;
+
+  // If true, the payload runs in a chroot into the mounted rootfs.
+  // If false, the agent just execs directly (used for escape-hatch
+  // debugging against the shared rootfs itself).
+  bool chroot = 5;
+
+  // Additional block devices (volumes) to mount inside the payload rootfs.
+  // Each entry is mounted at mount_path (relative to the payload rootfs).
+  repeated GuestVolumeMount mounts = 6;
+}
+
+message GuestVolumeMount {
+  // Block device inside the VM, e.g. "/dev/vdc".
+  string device = 1;
+  // Mount path inside the payload rootfs, e.g. "/data".
+  string mount_path = 2;
+  // Filesystem type. Defaults to "ext4".
+  string fstype = 3;
+  // If true, mount read-only.
+  bool read_only = 4;
+}
+
+message StartPayloadResponse {
+  int32 payload_pid = 1;
+}
+
+enum PayloadPhase {
+  PAYLOAD_PHASE_UNSPECIFIED = 0;
+  PAYLOAD_PHASE_RUNNING = 1;
+  PAYLOAD_PHASE_EXITED = 2;
+  PAYLOAD_PHASE_FAILED = 3;
+}
+
+message StatusRequest {}
+message StatusResponse {
+  PayloadPhase phase = 1;
+  int32 exit_code = 2;
+  string message = 3;
+}
+
+message LogsRequest {
+  bool follow = 1;
+  int32 tail_lines = 2;
+}
+message LogChunk {
+  bytes data = 1;
+}
+
+message ExecClientMessage {
+  oneof payload {
+    ExecConfig config = 1;
+    bytes stdin = 2;
+    ExecResize resize = 3;
+  }
+}
+message ExecConfig {
+  repeated string command = 1;
+  bool tty = 2;
+  map<string, string> env = 3;
+}
+message ExecResize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+message ExecServerMessage {
+  oneof payload {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    ExecExit exit = 3;
+  }
+}
+message ExecExit {
+  int32 exit_code = 1;
+}
+
+message StopRequest {
+  uint32 grace_seconds = 1;
+}
+message StopResponse {}

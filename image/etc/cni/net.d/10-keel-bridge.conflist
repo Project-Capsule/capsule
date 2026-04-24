@@ -1,0 +1,27 @@
+{
+  "cniVersion": "1.0.0",
+  "name": "keel-bridge",
+  "plugins": [
+    {
+      "type": "bridge",
+      "bridge": "br-keel",
+      "isGateway": true,
+      "isDefaultGateway": true,
+      "ipMasq": true,
+      "hairpinMode": true,
+      "ipam": {
+        "type": "host-local",
+        "dataDir": "/run/cni/ipam",
+        "ranges": [[{"subnet": "172.20.0.0/16", "gateway": "172.20.0.1"}]]
+      }
+    },
+    {
+      "type": "portmap",
+      "capabilities": {"portMappings": true},
+      "snat": true
+    },
+    {
+      "type": "firewall"
+    }
+  ]
+}

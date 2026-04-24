@@ -1,0 +1,5 @@
+name: nginx-host
+kind: Container
+container:
+  image: docker.io/library/nginx:1.27-alpine
+  networkMode: NETWORK_MODE_HOST

@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package capsule.v1;
+
+// CapsuleService exposes operations that describe or control the capsule
+// (the running capsule instance on a single machine) as a whole.
+service CapsuleService {
+  // GetInfo returns identity and runtime information about this capsule.
+  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+}
+
+message GetInfoRequest {}
+
+message GetInfoResponse {
+  // Hostname as reported by the kernel.
+  string hostname = 1;
+  // Kernel release string (uname -r).
+  string kernel_release = 2;
+  // Kernel version string (uname -v).
+  string kernel_version = 3;
+  // Machine architecture (uname -m).
+  string architecture = 4;
+  // Seconds since boot.
+  uint64 uptime_seconds = 5;
+  // Capsule version baked into the binary at build time.
+  string capsule_version = 6;
+  // Which A/B slot is currently active. Empty string until A/B updates ship.
+  string active_slot = 7;
+}

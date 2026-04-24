@@ -1,0 +1,6 @@
+# The build output directory is several GB (rootfs/perm/disk images) and
+# must never enter the docker build context.
+build/
+.git/
+*.swp
+.DS_Store

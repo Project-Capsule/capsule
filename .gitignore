@@ -1,0 +1,17 @@
+# Build artifacts — disk images, packed rootfs, linux binaries.
+# /build/ gets several GB during image builds and should never be committed.
+build/
+
+# Local editor / OS noise
+*.swp
+.DS_Store
+.vscode/
+.idea/
+
+# Go test binaries / profiles
+*.test
+*.out
+coverage.*
+
+# Claude Code session data (local agent scratch)
+.claude/

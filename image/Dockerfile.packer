@@ -1,0 +1,33 @@
+# Packer: a Linux/amd64 helper image that turns a Capsule rootfs tarball into
+# a bootable raw disk image. Pulls the Alpine linux-virt kernel + initramfs
+# and lays the partitions out using mtools + dd (no loop devices needed).
+FROM --platform=linux/amd64 alpine:3.20
+
+RUN apk add --no-cache \
+      bash \
+      squashfs-tools \
+      mtools \
+      dosfstools \
+      e2fsprogs \
+      e2fsprogs-extra \
+      sfdisk \
+      syslinux \
+      xxd
+
+# Fetch the Alpine linux-virt kernel and initramfs into /bootfiles. We do
+# this by apk-installing linux-virt into a throwaway root and pulling the
+# two files we need. mkinitfs's default 'base virtio squashfs ext4' feature
+# set is exactly what we need to boot our squashfs rootfs.
+RUN apk --no-cache --initdb --root /tmp/kroot \
+      --keys-dir /etc/apk/keys \
+      --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/main \
+      --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
+      add alpine-base linux-virt \
+ && mkdir -p /bootfiles \
+ && cp /tmp/kroot/boot/vmlinuz-virt   /bootfiles/vmlinuz \
+ && cp /tmp/kroot/boot/initramfs-virt /bootfiles/initramfs \
+ && rm -rf /tmp/kroot
+
+COPY image/pack.sh /pack.sh
+RUN chmod +x /pack.sh
+ENTRYPOINT ["/pack.sh"]

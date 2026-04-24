@@ -1,0 +1,10 @@
+name: nginx-vm
+kind: MicroVM
+microVm:
+  image: docker.io/library/nginx:alpine
+  vcpus: 1
+  memoryMib: 256
+  ports:
+    - containerPort: 80
+      hostPort: 8080
+      protocol: tcp

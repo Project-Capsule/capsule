@@ -1,0 +1,7 @@
+name: alpine-vm
+kind: MicroVM
+microVm:
+  kernelPath: /perm/volumes/vmimages/vmlinux
+  rootfsPath: /perm/volumes/vmimages/alpine-rootfs.ext4
+  vcpus: 1
+  memoryMib: 256

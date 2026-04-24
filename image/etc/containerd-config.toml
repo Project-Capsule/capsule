@@ -1,0 +1,15 @@
+version = 2
+root = "/perm/containerd/root"
+state = "/run/containerd"
+
+[grpc]
+  address = "/run/containerd/containerd.sock"
+
+[plugins]
+  [plugins."io.containerd.grpc.v1.cri"]
+    # We don't use containerd's CRI plugin (Kubernetes-specific); disable it.
+    disable_apparmor = true
+    disable_tcp_service = true
+
+[debug]
+  level = "info"

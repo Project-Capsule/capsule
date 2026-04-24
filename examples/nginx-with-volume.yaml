@@ -1,0 +1,13 @@
+name: nginx-data
+kind: Container
+container:
+  image: docker.io/library/nginx:1.27-alpine
+  networkMode: NETWORK_MODE_BRIDGE
+  ports:
+    - containerPort: 80
+      hostPort: 8080
+      protocol: tcp
+  mounts:
+    - volumeName: nginx-html
+      mountPath: /usr/share/nginx/html
+      readOnly: false

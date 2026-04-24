@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package capsule.v1;
+
+service VolumeService {
+  rpc Create(VolumeCreateRequest) returns (Volume);
+  rpc Get(VolumeGetRequest) returns (Volume);
+  rpc List(VolumeListRequest) returns (VolumeListResponse);
+  rpc Delete(VolumeDeleteRequest) returns (VolumeDeleteResponse);
+}
+
+message Volume {
+  // Unique name (DNS-1123 label).
+  string name = 1;
+  // Observed size on disk in bytes. Zero if not yet measured.
+  uint64 size_bytes = 2;
+  // Absolute path on the capsule (/perm/volumes/<name>).
+  string host_path = 3;
+  // Names of workloads that currently reference this volume via
+  // ContainerSpec.mounts. Populated by the server on Get / List.
+  repeated string mounted_by = 4;
+  // Wall-clock time the volume was created, unix seconds.
+  int64 created_at_unix = 5;
+}
+
+message VolumeCreateRequest {
+  string name = 1;
+}
+
+message VolumeGetRequest {
+  string name = 1;
+}
+
+message VolumeListRequest {}
+message VolumeListResponse {
+  repeated Volume volumes = 1;
+}
+
+message VolumeDeleteRequest {
+  string name = 1;
+  // When true, deletes even if workloads still reference the volume.
+  // When false, the server refuses deletion in that case.
+  bool force = 2;
+}
+message VolumeDeleteResponse {}

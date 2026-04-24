@@ -1,0 +1,9 @@
+name: alpine-vol-container
+kind: Container
+container:
+  image: docker.io/library/alpine:3.20
+  command: ["/bin/sh", "-c"]
+  args: ["cat /data/hello.txt 2>/dev/null; echo from-container >> /data/hello.txt; while :; do date; sleep 5; done"]
+  mounts:
+    - volumeName: shared-data
+      mountPath: /data

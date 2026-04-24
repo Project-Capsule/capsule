@@ -1,0 +1,11 @@
+name: alpine-vol
+kind: MicroVM
+microVm:
+  image: docker.io/library/alpine:3.20
+  vcpus: 1
+  memoryMib: 256
+  command: ["/bin/sh", "-c"]
+  args: ["echo hi > /data/hello.txt && while :; do cat /data/hello.txt; sleep 5; done"]
+  mounts:
+    - volumeName: alpine-data
+      mountPath: /data
