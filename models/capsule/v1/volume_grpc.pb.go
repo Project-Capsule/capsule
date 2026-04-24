@@ -23,6 +23,7 @@ const (
 	VolumeService_Get_FullMethodName    = "/capsule.v1.VolumeService/Get"
 	VolumeService_List_FullMethodName   = "/capsule.v1.VolumeService/List"
 	VolumeService_Delete_FullMethodName = "/capsule.v1.VolumeService/Delete"
+	VolumeService_Resize_FullMethodName = "/capsule.v1.VolumeService/Resize"
 )
 
 // VolumeServiceClient is the client API for VolumeService service.
@@ -33,6 +34,7 @@ type VolumeServiceClient interface {
 	Get(ctx context.Context, in *VolumeGetRequest, opts ...grpc.CallOption) (*Volume, error)
 	List(ctx context.Context, in *VolumeListRequest, opts ...grpc.CallOption) (*VolumeListResponse, error)
 	Delete(ctx context.Context, in *VolumeDeleteRequest, opts ...grpc.CallOption) (*VolumeDeleteResponse, error)
+	Resize(ctx context.Context, in *VolumeResizeRequest, opts ...grpc.CallOption) (*Volume, error)
 }
 
 type volumeServiceClient struct {
@@ -83,6 +85,16 @@ func (c *volumeServiceClient) Delete(ctx context.Context, in *VolumeDeleteReques
 	return out, nil
 }
 
+func (c *volumeServiceClient) Resize(ctx context.Context, in *VolumeResizeRequest, opts ...grpc.CallOption) (*Volume, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(Volume)
+	err := c.cc.Invoke(ctx, VolumeService_Resize_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // VolumeServiceServer is the server API for VolumeService service.
 // All implementations must embed UnimplementedVolumeServiceServer
 // for forward compatibility.
@@ -91,6 +103,7 @@ type VolumeServiceServer interface {
 	Get(context.Context, *VolumeGetRequest) (*Volume, error)
 	List(context.Context, *VolumeListRequest) (*VolumeListResponse, error)
 	Delete(context.Context, *VolumeDeleteRequest) (*VolumeDeleteResponse, error)
+	Resize(context.Context, *VolumeResizeRequest) (*Volume, error)
 	mustEmbedUnimplementedVolumeServiceServer()
 }
 
@@ -112,6 +125,9 @@ func (UnimplementedVolumeServiceServer) List(context.Context, *VolumeListRequest
 }
 func (UnimplementedVolumeServiceServer) Delete(context.Context, *VolumeDeleteRequest) (*VolumeDeleteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Delete not implemented")
+}
+func (UnimplementedVolumeServiceServer) Resize(context.Context, *VolumeResizeRequest) (*Volume, error) {
+	return nil, status.Error(codes.Unimplemented, "method Resize not implemented")
 }
 func (UnimplementedVolumeServiceServer) mustEmbedUnimplementedVolumeServiceServer() {}
 func (UnimplementedVolumeServiceServer) testEmbeddedByValue()                       {}
@@ -206,6 +222,24 @@ func _VolumeService_Delete_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _VolumeService_Resize_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VolumeResizeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VolumeServiceServer).Resize(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: VolumeService_Resize_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VolumeServiceServer).Resize(ctx, req.(*VolumeResizeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // VolumeService_ServiceDesc is the grpc.ServiceDesc for VolumeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -228,6 +262,10 @@ var VolumeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Delete",
 			Handler:    _VolumeService_Delete_Handler,
+		},
+		{
+			MethodName: "Resize",
+			Handler:    _VolumeService_Resize_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

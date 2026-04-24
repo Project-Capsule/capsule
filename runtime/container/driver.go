@@ -480,22 +480,25 @@ type nopWriter struct{}
 func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // Volume paths on the capsule:
-//   - backing ext4 file: /perm/volumes/<name>.ext4
+//   - backing LV: /dev/capsule/vol-<name> (ext4 formatted thin LV)
 //   - per-workload mount point: /run/capsule/mounts/<workload>/<name>
 //
-// Each container workload loop-mounts its declared volume ext4 files at
-// the per-workload mount points; the OCI runtime spec then bind-mounts
-// that capsule path into the container at the requested mount_path.
-// Mirrors the VM-side path (same .ext4 file, attached as virtio-blk).
-const (
-	volumeBackingDir = "/perm/volumes"
-	volumeMountDir   = "/run/capsule/mounts"
-)
+// Each container workload directly mounts its declared volume LV at the
+// per-workload mount point (no loop device — it's already a block device);
+// the OCI runtime spec then bind-mounts that capsule path into the
+// container at the requested mount_path. VM-side attaches the same LV as
+// virtio-blk. One mounter at a time.
+const volumeMountDir = "/run/capsule/mounts"
 
-// mountContainerVolumes loop-mounts each declared ext4 volume at
-// /run/capsule/mounts/<workload>/<volumeName>. Returns the list of
-// (volumeName → mount path) entries for bindMounts to consume.
-// Caller must call unmountContainerVolumes on error or container teardown.
+// volumeBlockDevice resolves a volume name to its LV block-device path.
+// Kept out-of-line so a future change to the LVM naming scheme has one
+// place to update.
+func volumeBlockDevice(name string) string { return "/dev/capsule/vol-" + name }
+
+// mountContainerVolumes mounts each declared volume's ext4 LV at
+// /run/capsule/mounts/<workload>/<volumeName>. Returns the map of
+// (volumeName → mount path) for bindMounts to consume. Caller must call
+// unmountContainerVolumes on error or container teardown.
 func mountContainerVolumes(workload string, declared []*capsulev1.VolumeMount) (map[string]string, error) {
 	if len(declared) == 0 {
 		return nil, nil
@@ -506,20 +509,21 @@ func mountContainerVolumes(workload string, declared []*capsulev1.VolumeMount) (
 		if vol == "" {
 			continue
 		}
-		ext4 := filepath.Join(volumeBackingDir, vol+".ext4")
-		if _, err := os.Stat(ext4); err != nil {
+		dev := volumeBlockDevice(vol)
+		if _, err := os.Stat(dev); err != nil {
 			return mounted, fmt.Errorf("volume %q: %w (run `capsulectl volume create %s`)", vol, err, vol)
 		}
 		mp := filepath.Join(volumeMountDir, workload, vol)
 		if err := os.MkdirAll(mp, 0o755); err != nil {
 			return mounted, fmt.Errorf("mkdir %s: %w", mp, err)
 		}
-		opts := []string{"loop"}
+		args := []string{"-t", "ext4"}
 		if m.GetReadOnly() {
-			opts = append(opts, "ro")
+			args = append(args, "-o", "ro")
 		}
-		if err := runMount("-o", strings.Join(opts, ","), ext4, mp); err != nil {
-			return mounted, fmt.Errorf("loop-mount %s at %s: %w", ext4, mp, err)
+		args = append(args, dev, mp)
+		if err := runMount(args...); err != nil {
+			return mounted, fmt.Errorf("mount %s at %s: %w", dev, mp, err)
 		}
 		mounted[vol] = mp
 	}

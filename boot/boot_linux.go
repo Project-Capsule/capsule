@@ -121,28 +121,57 @@ func enableIPForward() error {
 	return os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0o644)
 }
 
-// mountPerm mounts the PERM-labeled ext4 partition at /perm and ensures the
-// well-known subdirectories exist (/perm/capsule, /perm/containerd/root).
-// The by-label resolution uses /dev/disk/by-label, which devtmpfs + blkid
-// populate automatically; we retry briefly in case it hasn't landed yet.
+// mountPerm activates the capsule volume group and mounts its meta LV at
+// /perm. The meta LV holds state.db, logs, and containerd's root; user
+// volumes + containerd devmapper snapshots live in the sibling thin pool
+// inside the same VG (not mounted here — those are block devices handed
+// out by the volume service and devmapper snapshotter).
+//
+// First-boot path: if the PERM partition (pack.sh creates it zeroed)
+// has no LVM PV signature yet, we pvcreate/vgcreate/lvcreate here so the
+// operator doesn't have to. Subsequent boots see the existing PV and
+// just activate.
+//
+// Layout on disk (built by image/pack.sh, initialized on first boot):
+//
+//	VG "capsule" on /dev/vda3
+//	  ├─ LV "meta"      (plain LV, ext4)          → mounted here
+//	  └─ LV "thinpool"  (dm-thin pool)            → volumes + snapshots
 func mountPerm() error {
-	const target = "/perm"
-	const label = "PERM"
+	const (
+		target  = "/perm"
+		vg      = "capsule"
+		metaLV  = "meta"
+		permDev = "/dev/vda3"
+	)
 
-	// Directory must already exist — rootfs may be read-only at this point.
 	if _, err := os.Stat(target); err != nil {
 		return fmt.Errorf("mount point %s missing (rootfs must pre-create it): %w", target, err)
 	}
 
-	// Already mounted (e.g. from initramfs)?
 	if mounted, _ := isMounted(target); mounted {
 		slog.Info("/perm already mounted")
 		return ensurePermDirs(target)
 	}
 
-	device, err := resolvePermDevice(label)
-	if err != nil {
-		return err
+	if _, err := os.Stat(permDev); err != nil {
+		return fmt.Errorf("PERM device %s missing: %w", permDev, err)
+	}
+
+	if !pvExists(permDev) {
+		slog.Info("initializing capsule VG on first boot", "device", permDev)
+		if err := initializeCapsuleVG(permDev); err != nil {
+			return fmt.Errorf("initialize VG %s: %w", vg, err)
+		}
+	}
+
+	if err := activateVG(vg); err != nil {
+		return fmt.Errorf("activate vg %s: %w", vg, err)
+	}
+
+	device := "/dev/" + vg + "/" + metaLV
+	if err := waitForBlockDevice(device, 2*time.Second); err != nil {
+		return fmt.Errorf("waiting for %s: %w", device, err)
 	}
 
 	if err := unix.Mount(device, target, "ext4", 0, ""); err != nil {
@@ -153,34 +182,86 @@ func mountPerm() error {
 	return ensurePermDirs(target)
 }
 
-// resolvePermDevice returns the block device for the PERM partition. We try
-// /dev/disk/by-label/PERM first; if devtmpfs hasn't created it yet, fall
-// back to scanning /sys/class/block for a child partition whose fs label is
-// PERM — but for phase 1 we keep it simple and hard-code /dev/vda3 as a
-// second fallback (matches the packer's partition order).
-func resolvePermDevice(label string) (string, error) {
-	byLabel := "/dev/disk/by-label/" + label
-	for i := 0; i < 20; i++ {
-		if _, err := os.Stat(byLabel); err == nil {
-			resolved, err := os.Readlink(byLabel)
-			if err != nil {
-				return byLabel, nil
-			}
-			// Symlink is relative (e.g. ../../vda3).
-			if !strings.HasPrefix(resolved, "/") {
-				resolved = "/dev/" + filepath.Base(resolved)
-			}
-			return resolved, nil
+// pvExists reports whether dev already has an LVM PV signature. Used to
+// decide between "activate existing VG" and "first-boot initialize".
+// `pvs <dev>` exits 0 when there's a PV, non-zero otherwise.
+func pvExists(dev string) bool {
+	return exec.Command("/sbin/pvs", "--noheadings", dev).Run() == nil
+}
+
+// initializeCapsuleVG runs the first-boot sequence that turns a blank
+// PERM partition into the capsule VG: pvcreate, vgcreate, an ext4 meta
+// LV for /perm, and a thin pool for volumes + containerd snapshots.
+//
+// Sizes:
+//   - meta LV: 512 MiB. Enough for state.db (sqlite) + /perm/containerd/root
+//     metadata; user-visible logs go to tmpfs, not /perm.
+//   - thinpool: the remainder of the VG (minus a small reserve LVM wants
+//     for metadata volumes), thin-provisioned so declared LV sizes don't
+//     preallocate.
+func initializeCapsuleVG(dev string) error {
+	if err := runLVM("/sbin/pvcreate", "-ff", "-y", dev); err != nil {
+		return err
+	}
+	if err := runLVM("/sbin/vgcreate", "capsule", dev); err != nil {
+		return err
+	}
+	if err := runLVM("/sbin/lvcreate", "-L", "512M", "-n", "meta", "capsule"); err != nil {
+		return err
+	}
+	if err := runLVM("/usr/sbin/mkfs.ext4", "-q", "-F", "/dev/capsule/meta"); err != nil {
+		// Fall back to /sbin path in case mkfs.ext4 is only there.
+		if err2 := runLVM("/sbin/mkfs.ext4", "-q", "-F", "/dev/capsule/meta"); err2 != nil {
+			return fmt.Errorf("mkfs.ext4 /dev/capsule/meta: %w / %w", err, err2)
+		}
+	}
+	// Thin pool: use 95% of remaining VG extents so LVM has a little
+	// headroom to grow pool metadata if it needs to. --monitor n because
+	// we don't run dmeventd (yet); without it LVM's auto-extend doesn't
+	// wire up, but activation succeeds.
+	if err := runLVM("/sbin/lvcreate", "--monitor", "n", "-l", "95%FREE", "--thinpool", "thinpool", "capsule"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// activateVG scans + activates all LVs in the volume group. Idempotent:
+// already-active LVs are no-ops for LVM. Without this step, the per-LV
+// device nodes under /dev/<vg>/ don't exist yet because LVM doesn't
+// auto-activate at kernel bringup.
+//
+// --monitor n suppresses the dmeventd hookup. We don't ship dmeventd on
+// the capsule yet; without --monitor n, LVM prints a warning and returns
+// non-zero even though the LVs came up. When we want thin-pool autoextend
+// (Phase B/C on PLAN.md), wire dmeventd separately.
+func activateVG(vg string) error {
+	_ = runLVM("/sbin/vgscan", "--mknodes")
+	if err := runLVM("/sbin/vgchange", "--monitor", "n", "-ay", vg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func runLVM(bin string, args ...string) error {
+	cmd := exec.Command(bin, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %s: %w: %s", bin, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// waitForBlockDevice polls for path to appear as a block device, up to
+// deadline. LVM's udev rules create /dev/<vg>/<lv> symlinks asynchronously.
+func waitForBlockDevice(path string, deadline time.Duration) error {
+	until := time.Now().Add(deadline)
+	for time.Now().Before(until) {
+		if _, err := os.Stat(path); err == nil {
+			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	// Fallback: hard-code the expected partition when udev-style label
-	// links are absent (minimal Alpine initramfs may not populate them).
-	if _, err := os.Stat("/dev/vda3"); err == nil {
-		slog.Warn("by-label not found, falling back to /dev/vda3")
-		return "/dev/vda3", nil
-	}
-	return "", fmt.Errorf("no device with label %s and /dev/vda3 absent", label)
+	return fmt.Errorf("block device %s not present after %s", path, deadline)
 }
 
 func ensurePermDirs(root string) error {

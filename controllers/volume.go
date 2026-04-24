@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	stderrors "errors"
+	"log/slog"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -19,7 +20,8 @@ type VolumeController struct {
 }
 
 func (c *VolumeController) Create(ctx context.Context, req *capsulev1.VolumeCreateRequest) (*capsulev1.Volume, error) {
-	v, err := c.Service.Create(ctx, req.GetName())
+	slog.Info("VolumeController.Create", "name", req.GetName(), "req_size_mib", req.GetSizeMib())
+	v, err := c.Service.Create(ctx, req.GetName(), req.GetSizeMib())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -53,4 +55,20 @@ func (c *VolumeController) Delete(ctx context.Context, req *capsulev1.VolumeDele
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	return &capsulev1.VolumeDeleteResponse{}, nil
+}
+
+func (c *VolumeController) Resize(ctx context.Context, req *capsulev1.VolumeResizeRequest) (*capsulev1.Volume, error) {
+	v, err := c.Service.Resize(ctx, req.GetName(), req.GetNewSizeMib())
+	if err != nil {
+		switch {
+		case stderrors.Is(err, store.ErrNotFound):
+			return nil, status.Errorf(codes.NotFound, "volume %q not found", req.GetName())
+		case stderrors.Is(err, corevolume.ErrInUse):
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		case stderrors.Is(err, corevolume.ErrShrink):
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	return v, nil
 }

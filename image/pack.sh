@@ -55,15 +55,17 @@ truncate -s "$ROOTFS_SIZE" "$ROOT_IMG"
 # -d populates the filesystem at format time; no mount required.
 mkfs.ext4 -q -L ROOTFS -d /tmp/rootfs -F "$ROOT_IMG"
 
-# ---- 3. build (or keep) the PERM ext4 image -------------------------------
-# PERM holds state.db + volumes + containerd image cache. On real hardware
-# it lives on a real partition that obviously survives. For dev/QEMU we
-# want the same — rebuilds of the OS image must not wipe capsule state.
+# ---- 3. build (or keep) the PERM partition --------------------------------
+# PERM holds the LVM physical volume for VG "capsule": meta LV (ext4,
+# mounted at /perm for state.db + containerd/root) plus the thin pool
+# backing user volumes and containerd devmapper snapshots. We don't
+# mkfs anything here — capsuled initializes the VG at first boot if the
+# partition is unformatted, and preserves it across rebuilds otherwise.
 #
 # Strategy:
-#   - If an existing disk.raw has a PERM partition, extract it back into
-#     perm.ext4 so we capture any runtime writes the VM made.
-#   - If perm.ext4 is missing or size-mismatched, create a fresh one.
+#   - If an existing disk.raw has a PERM partition, extract it byte-for-byte
+#     so LVM metadata + thin pool extents survive the rebuild.
+#   - Else create a zeroed partition; first boot will pvcreate/vgcreate it.
 #
 # Run `make clean` (which rm's build/) to force a fresh PERM.
 PERM_BYTES=$(( PERM_SIZE_MIB * 1024 * 1024 ))
@@ -87,9 +89,8 @@ if [ -f "$DISK" ]; then
 fi
 
 if [ ! -f "$PERM_IMG" ]; then
-  echo "pack.sh: creating fresh perm image (${PERM_SIZE_MIB} MiB)"
+  echo "pack.sh: creating fresh (unformatted) perm image (${PERM_SIZE_MIB} MiB); first boot will initialize LVM"
   truncate -s "$PERM_BYTES" "$PERM_IMG"
-  mkfs.ext4 -q -L PERM -F "$PERM_IMG"
 fi
 
 # ---- 4. build the FAT32 /boot image ----------------------------------------

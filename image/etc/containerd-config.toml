@@ -5,6 +5,12 @@ state = "/run/containerd"
 [grpc]
   address = "/run/containerd/containerd.sock"
 
+# Snapshotter note: containerd uses overlayfs by default for both the
+# container driver and VM image unpacks. User volumes are LVM thin LVs
+# managed by core/volume — not by containerd's snapshotter. Switching
+# VM payload disks to containerd's devmapper snapshotter is tracked in
+# PLAN.md; it needs a dmsetup-managed thin pool (not LVM-managed) so
+# containerd can own its own thin device-id allocation without clashing.
 [plugins]
   [plugins."io.containerd.grpc.v1.cri"]
     # We don't use containerd's CRI plugin (Kubernetes-specific); disable it.

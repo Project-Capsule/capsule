@@ -7,17 +7,20 @@ service VolumeService {
   rpc Get(VolumeGetRequest) returns (Volume);
   rpc List(VolumeListRequest) returns (VolumeListResponse);
   rpc Delete(VolumeDeleteRequest) returns (VolumeDeleteResponse);
+  rpc Resize(VolumeResizeRequest) returns (Volume);
 }
 
 message Volume {
   // Unique name (DNS-1123 label).
   string name = 1;
-  // Observed size on disk in bytes. Zero if not yet measured.
+  // Provisioned size in bytes (thin LV virtual size). Actual on-disk usage
+  // is a subset — thin LVs only allocate blocks on write.
   uint64 size_bytes = 2;
-  // Absolute path on the capsule (/perm/volumes/<name>).
+  // Absolute block-device path on the capsule (/dev/capsule/vol-<name>).
+  // Thin LV in the capsule VG; ext4 formatted directly on the LV.
   string host_path = 3;
   // Names of workloads that currently reference this volume via
-  // ContainerSpec.mounts. Populated by the server on Get / List.
+  // ContainerSpec.mounts or MicroVMSpec.mounts. Populated on Get / List.
   repeated string mounted_by = 4;
   // Wall-clock time the volume was created, unix seconds.
   int64 created_at_unix = 5;
@@ -25,6 +28,8 @@ message Volume {
 
 message VolumeCreateRequest {
   string name = 1;
+  // Provisioned size in MiB. 0 means the server default (512).
+  uint64 size_mib = 2;
 }
 
 message VolumeGetRequest {
@@ -43,3 +48,9 @@ message VolumeDeleteRequest {
   bool force = 2;
 }
 message VolumeDeleteResponse {}
+
+message VolumeResizeRequest {
+  string name = 1;
+  // New provisioned size in MiB. Must be >= current size (grow-only).
+  uint64 new_size_mib = 2;
+}

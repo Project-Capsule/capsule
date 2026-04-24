@@ -25,12 +25,14 @@ type Volume struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Unique name (DNS-1123 label).
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// Observed size on disk in bytes. Zero if not yet measured.
+	// Provisioned size in bytes (thin LV virtual size). Actual on-disk usage
+	// is a subset — thin LVs only allocate blocks on write.
 	SizeBytes uint64 `protobuf:"varint,2,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	// Absolute path on the capsule (/perm/volumes/<name>).
+	// Absolute block-device path on the capsule (/dev/capsule/vol-<name>).
+	// Thin LV in the capsule VG; ext4 formatted directly on the LV.
 	HostPath string `protobuf:"bytes,3,opt,name=host_path,json=hostPath,proto3" json:"host_path,omitempty"`
 	// Names of workloads that currently reference this volume via
-	// ContainerSpec.mounts. Populated by the server on Get / List.
+	// ContainerSpec.mounts or MicroVMSpec.mounts. Populated on Get / List.
 	MountedBy []string `protobuf:"bytes,4,rep,name=mounted_by,json=mountedBy,proto3" json:"mounted_by,omitempty"`
 	// Wall-clock time the volume was created, unix seconds.
 	CreatedAtUnix int64 `protobuf:"varint,5,opt,name=created_at_unix,json=createdAtUnix,proto3" json:"created_at_unix,omitempty"`
@@ -104,8 +106,10 @@ func (x *Volume) GetCreatedAtUnix() int64 {
 }
 
 type VolumeCreateRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Provisioned size in MiB. 0 means the server default (512).
+	SizeMib       uint64 `protobuf:"varint,2,opt,name=size_mib,json=sizeMib,proto3" json:"size_mib,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -145,6 +149,13 @@ func (x *VolumeCreateRequest) GetName() string {
 		return x.Name
 	}
 	return ""
+}
+
+func (x *VolumeCreateRequest) GetSizeMib() uint64 {
+	if x != nil {
+		return x.SizeMib
+	}
+	return 0
 }
 
 type VolumeGetRequest struct {
@@ -361,6 +372,59 @@ func (*VolumeDeleteResponse) Descriptor() ([]byte, []int) {
 	return file_capsule_v1_volume_proto_rawDescGZIP(), []int{6}
 }
 
+type VolumeResizeRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// New provisioned size in MiB. Must be >= current size (grow-only).
+	NewSizeMib    uint64 `protobuf:"varint,2,opt,name=new_size_mib,json=newSizeMib,proto3" json:"new_size_mib,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *VolumeResizeRequest) Reset() {
+	*x = VolumeResizeRequest{}
+	mi := &file_capsule_v1_volume_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VolumeResizeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VolumeResizeRequest) ProtoMessage() {}
+
+func (x *VolumeResizeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_volume_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VolumeResizeRequest.ProtoReflect.Descriptor instead.
+func (*VolumeResizeRequest) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_volume_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *VolumeResizeRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *VolumeResizeRequest) GetNewSizeMib() uint64 {
+	if x != nil {
+		return x.NewSizeMib
+	}
+	return 0
+}
+
 var File_capsule_v1_volume_proto protoreflect.FileDescriptor
 
 const file_capsule_v1_volume_proto_rawDesc = "" +
@@ -374,9 +438,10 @@ const file_capsule_v1_volume_proto_rawDesc = "" +
 	"\thost_path\x18\x03 \x01(\tR\bhostPath\x12\x1d\n" +
 	"\n" +
 	"mounted_by\x18\x04 \x03(\tR\tmountedBy\x12&\n" +
-	"\x0fcreated_at_unix\x18\x05 \x01(\x03R\rcreatedAtUnix\")\n" +
+	"\x0fcreated_at_unix\x18\x05 \x01(\x03R\rcreatedAtUnix\"D\n" +
 	"\x13VolumeCreateRequest\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\"&\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
+	"\bsize_mib\x18\x02 \x01(\x04R\asizeMib\"&\n" +
 	"\x10VolumeGetRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x13\n" +
 	"\x11VolumeListRequest\"B\n" +
@@ -385,12 +450,17 @@ const file_capsule_v1_volume_proto_rawDesc = "" +
 	"\x13VolumeDeleteRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
 	"\x05force\x18\x02 \x01(\bR\x05force\"\x16\n" +
-	"\x14VolumeDeleteResponse2\x9b\x02\n" +
+	"\x14VolumeDeleteResponse\"K\n" +
+	"\x13VolumeResizeRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
+	"\fnew_size_mib\x18\x02 \x01(\x04R\n" +
+	"newSizeMib2\xda\x02\n" +
 	"\rVolumeService\x12=\n" +
 	"\x06Create\x12\x1f.capsule.v1.VolumeCreateRequest\x1a\x12.capsule.v1.Volume\x127\n" +
 	"\x03Get\x12\x1c.capsule.v1.VolumeGetRequest\x1a\x12.capsule.v1.Volume\x12E\n" +
 	"\x04List\x12\x1d.capsule.v1.VolumeListRequest\x1a\x1e.capsule.v1.VolumeListResponse\x12K\n" +
-	"\x06Delete\x12\x1f.capsule.v1.VolumeDeleteRequest\x1a .capsule.v1.VolumeDeleteResponseB\xa4\x01\n" +
+	"\x06Delete\x12\x1f.capsule.v1.VolumeDeleteRequest\x1a .capsule.v1.VolumeDeleteResponse\x12=\n" +
+	"\x06Resize\x12\x1f.capsule.v1.VolumeResizeRequest\x1a\x12.capsule.v1.VolumeB\xa4\x01\n" +
 	"\x0ecom.capsule.v1B\vVolumeProtoP\x01Z<github.com/geekgonecrazy/capsule/models/capsule/v1;capsulev1\xa2\x02\x03CXX\xaa\x02\n" +
 	"Capsule.V1\xca\x02\n" +
 	"Capsule\\V1\xe2\x02\x16Capsule\\V1\\GPBMetadata\xea\x02\vCapsule::V1b\x06proto3"
@@ -407,7 +477,7 @@ func file_capsule_v1_volume_proto_rawDescGZIP() []byte {
 	return file_capsule_v1_volume_proto_rawDescData
 }
 
-var file_capsule_v1_volume_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_capsule_v1_volume_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_capsule_v1_volume_proto_goTypes = []any{
 	(*Volume)(nil),               // 0: capsule.v1.Volume
 	(*VolumeCreateRequest)(nil),  // 1: capsule.v1.VolumeCreateRequest
@@ -416,6 +486,7 @@ var file_capsule_v1_volume_proto_goTypes = []any{
 	(*VolumeListResponse)(nil),   // 4: capsule.v1.VolumeListResponse
 	(*VolumeDeleteRequest)(nil),  // 5: capsule.v1.VolumeDeleteRequest
 	(*VolumeDeleteResponse)(nil), // 6: capsule.v1.VolumeDeleteResponse
+	(*VolumeResizeRequest)(nil),  // 7: capsule.v1.VolumeResizeRequest
 }
 var file_capsule_v1_volume_proto_depIdxs = []int32{
 	0, // 0: capsule.v1.VolumeListResponse.volumes:type_name -> capsule.v1.Volume
@@ -423,12 +494,14 @@ var file_capsule_v1_volume_proto_depIdxs = []int32{
 	2, // 2: capsule.v1.VolumeService.Get:input_type -> capsule.v1.VolumeGetRequest
 	3, // 3: capsule.v1.VolumeService.List:input_type -> capsule.v1.VolumeListRequest
 	5, // 4: capsule.v1.VolumeService.Delete:input_type -> capsule.v1.VolumeDeleteRequest
-	0, // 5: capsule.v1.VolumeService.Create:output_type -> capsule.v1.Volume
-	0, // 6: capsule.v1.VolumeService.Get:output_type -> capsule.v1.Volume
-	4, // 7: capsule.v1.VolumeService.List:output_type -> capsule.v1.VolumeListResponse
-	6, // 8: capsule.v1.VolumeService.Delete:output_type -> capsule.v1.VolumeDeleteResponse
-	5, // [5:9] is the sub-list for method output_type
-	1, // [1:5] is the sub-list for method input_type
+	7, // 5: capsule.v1.VolumeService.Resize:input_type -> capsule.v1.VolumeResizeRequest
+	0, // 6: capsule.v1.VolumeService.Create:output_type -> capsule.v1.Volume
+	0, // 7: capsule.v1.VolumeService.Get:output_type -> capsule.v1.Volume
+	4, // 8: capsule.v1.VolumeService.List:output_type -> capsule.v1.VolumeListResponse
+	6, // 9: capsule.v1.VolumeService.Delete:output_type -> capsule.v1.VolumeDeleteResponse
+	0, // 10: capsule.v1.VolumeService.Resize:output_type -> capsule.v1.Volume
+	6, // [6:11] is the sub-list for method output_type
+	1, // [1:6] is the sub-list for method input_type
 	1, // [1:1] is the sub-list for extension type_name
 	1, // [1:1] is the sub-list for extension extendee
 	0, // [0:1] is the sub-list for field type_name
@@ -445,7 +518,7 @@ func file_capsule_v1_volume_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_capsule_v1_volume_proto_rawDesc), len(file_capsule_v1_volume_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

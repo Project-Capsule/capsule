@@ -27,11 +27,17 @@ RUN apk add --no-cache \
       linux-virt \
       # CNI plugins for bridge networking + portmap + firewall.
       cni-plugins \
-      # mkfs.ext4 -d is used both at build time (pack vm-shared.ext4) and
-      # at runtime (pack per-VM OCI payload disks). e2fsprogs-extra ships
+      # mkfs.ext4 + resize2fs run at build time (vm-shared.ext4) and at
+      # runtime (user volume LV format / grow). e2fsprogs-extra ships
       # `debugfs` which we use to inject device nodes into the ext4 at
       # build time (overlayfs can't mknod).
-      e2fsprogs e2fsprogs-extra
+      e2fsprogs e2fsprogs-extra \
+      # LVM2 + thin-provisioning-tools back the storage layer: /perm is a
+      # plain LV in VG "capsule"; user volumes and containerd devmapper
+      # snapshots share a thin pool in the same VG. Without these the boot
+      # path can't activate the VG and volume ops fail.
+      lvm2 lvm2-dmeventd device-mapper \
+      thin-provisioning-tools
 # Alpine ships CNI plugins at /usr/libexec/cni; CNI's default lookup is
 # /opt/cni/bin. Symlink so standard tooling (go-cni) finds them.
 RUN mkdir -p /opt/cni && ln -sf /usr/libexec/cni /opt/cni/bin

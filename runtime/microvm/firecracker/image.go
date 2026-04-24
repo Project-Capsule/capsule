@@ -46,12 +46,19 @@ type OCIPayload struct {
 	Cwd     string
 }
 
-// buildPayloadDisk pulls the OCI image (if needed), flattens its layers
+// preparePayloadDisk pulls the OCI image (if needed), flattens its layers
 // into a directory, and packs the directory into an ext4 image at
 // /run/capsule/vms/<name>/payload.ext4. The shared VM rootfs (/dev/vda)
 // handles init; this disk carries only the user's application payload
 // and is mounted by capsule-guest at /oci inside the VM.
-func (d *Driver) buildPayloadDisk(parentCtx context.Context, w *capsulev1.Workload, vmDir string) (string, *OCIPayload, error) {
+//
+// Future optimization (tracked in PLAN.md): switch VM images to
+// containerd's devmapper snapshotter so we share layer blocks between
+// VMs at the thin-pool level. Today we use overlayfs + a flatten pass
+// because LVM and containerd-devmapper clash over thin-pool device-ID
+// allocation and resolving that needs a dmsetup-managed pool, not an
+// LVM one.
+func (d *Driver) preparePayloadDisk(parentCtx context.Context, w *capsulev1.Workload, vmDir string) (string, *OCIPayload, error) {
 	spec := w.GetMicroVm()
 	ref := spec.GetImage()
 	if ref == "" {
@@ -97,6 +104,13 @@ func (d *Driver) buildPayloadDisk(parentCtx context.Context, w *capsulev1.Worklo
 
 	return ext4Path, payload, nil
 }
+
+// releasePayloadSnapshot is a no-op in the current flatten-to-ext4
+// architecture — the per-VM payload.ext4 lives in /run/capsule/vms/<name>/
+// and is removed with the rest of that state dir in Driver.Remove. Kept
+// as a named function so the driver.go call site has the right shape
+// when we switch to a snapshotter-backed payload later.
+func (d *Driver) releasePayloadSnapshot(context.Context, string) {}
 
 // containerd returns a lazily-dialled containerd client used for VM image pulls.
 func (d *Driver) containerd() (*containerd.Client, error) {
@@ -261,11 +275,7 @@ func buildOCIPayload(ctx context.Context, client *containerd.Client, img contain
 		env = append(env, k+"="+v)
 	}
 
-	return &OCIPayload{
-		Command: argv,
-		Env:     env,
-		Cwd:     imageCfg.Config.WorkingDir,
-	}, nil
+	return &OCIPayload{Command: argv, Env: env, Cwd: imageCfg.Config.WorkingDir}, nil
 }
 
 func readContent(ctx context.Context, client *containerd.Client, desc ocispec.Descriptor) ([]byte, error) {

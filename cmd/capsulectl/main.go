@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -104,11 +105,27 @@ func main() {
 		}
 		err = workloadLogs(*addr, positionals[0], *follow, *tail, *serial)
 	case "volume create":
-		if len(subArgs) < 1 {
+		// Go's flag.Parse stops at the first non-flag token. We (a) join
+		// "--foo VAL" into "--foo=VAL" so they're a single token, then
+		// (b) front-load all flag tokens ahead of positionals so Parse
+		// sees them before it bails.
+		normalized := frontLoadFlags(joinValueFlags(subArgs, map[string]bool{"size": true}))
+		fs := flag.NewFlagSet("volume create", flag.ExitOnError)
+		size := fs.String("size", "", "size with unit suffix (e.g. 10GiB, 512MiB); bare int = MiB; omit for default")
+		_ = fs.Parse(normalized)
+		if fs.NArg() < 1 {
 			err = errors.New("volume create requires a name")
 			break
 		}
-		err = volumeCreate(*addr, subArgs[0])
+		var sizeMiB uint64
+		if *size != "" {
+			sizeMiB, err = parseSize(*size)
+			if err != nil {
+				err = fmt.Errorf("--size: %w", err)
+				break
+			}
+		}
+		err = volumeCreate(*addr, fs.Arg(0), sizeMiB)
 	case "volume list":
 		err = volumeList(*addr)
 	case "volume get":
@@ -126,6 +143,18 @@ func main() {
 			break
 		}
 		err = volumeDelete(*addr, fs.Arg(0), *force)
+	case "volume resize":
+		if len(subArgs) < 2 {
+			err = errors.New("volume resize requires <name> <size>")
+			break
+		}
+		var sizeMiB uint64
+		sizeMiB, err = parseSize(subArgs[1])
+		if err != nil {
+			err = fmt.Errorf("size: %w", err)
+			break
+		}
+		err = volumeResize(*addr, subArgs[0], sizeMiB)
 	case "workload exec":
 		// Split subArgs at `--` so the command can contain anything. Then
 		// extract flag tokens (starting with '-') from the left half so
@@ -173,10 +202,11 @@ Usage:
   capsulectl [--capsule host:port] workload start <name>
   capsulectl [--capsule host:port] workload logs [-f] [-n N] [--serial] <name>
   capsulectl [--capsule host:port] workload exec [-t] <name> -- <cmd> [args...]
-  capsulectl [--capsule host:port] volume create <name>
+  capsulectl [--capsule host:port] volume create [--size 10GiB] <name>
   capsulectl [--capsule host:port] volume list
   capsulectl [--capsule host:port] volume get <name>
   capsulectl [--capsule host:port] volume delete [--force] <name>
+  capsulectl [--capsule host:port] volume resize <name> <size>
 `)
 }
 
@@ -602,7 +632,7 @@ Loop:
 
 // --- volume -----------------------------------------------------------------
 
-func volumeCreate(addr, name string) error {
+func volumeCreate(addr, name string, sizeMiB uint64) error {
 	conn, err := dial(addr)
 	if err != nil {
 		return err
@@ -610,13 +640,64 @@ func volumeCreate(addr, name string) error {
 	defer conn.Close()
 	client := capsulev1.NewVolumeServiceClient(conn)
 	return withCtx(func(ctx context.Context) error {
-		v, err := client.Create(ctx, &capsulev1.VolumeCreateRequest{Name: name})
+		v, err := client.Create(ctx, &capsulev1.VolumeCreateRequest{Name: name, SizeMib: sizeMiB})
 		if err != nil {
 			return err
 		}
 		fmt.Printf("created volume %q at %s\n", v.GetName(), v.GetHostPath())
 		return nil
 	})
+}
+
+func volumeResize(addr, name string, newSizeMiB uint64) error {
+	conn, err := dial(addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := capsulev1.NewVolumeServiceClient(conn)
+	return withCtx(func(ctx context.Context) error {
+		v, err := client.Resize(ctx, &capsulev1.VolumeResizeRequest{Name: name, NewSizeMib: newSizeMiB})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("resized volume %q to %s\n", v.GetName(), humanBytes(v.GetSizeBytes()))
+		return nil
+	})
+}
+
+// parseSize accepts size specs like "10GiB", "512MiB", "1TiB". A bare
+// integer is interpreted as MiB. Returns the size in MiB. Binary units
+// only (1 KiB = 1024 B); decimal suffixes would be ambiguous for storage.
+func parseSize(s string) (uint64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, errors.New("empty size")
+	}
+	// Split trailing unit (letters) from numeric prefix.
+	i := len(s)
+	for i > 0 && !(s[i-1] >= '0' && s[i-1] <= '9') {
+		i--
+	}
+	num, unit := s[:i], strings.ToLower(strings.TrimSpace(s[i:]))
+	n, err := strconv.ParseUint(strings.TrimSpace(num), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %q: %w", s, err)
+	}
+	switch unit {
+	case "", "m", "mi", "mib":
+		return n, nil
+	case "k", "ki", "kib":
+		if n%1024 != 0 {
+			return 0, fmt.Errorf("%s not a whole MiB", s)
+		}
+		return n / 1024, nil
+	case "g", "gi", "gib":
+		return n * 1024, nil
+	case "t", "ti", "tib":
+		return n * 1024 * 1024, nil
+	}
+	return 0, fmt.Errorf("unknown size unit %q (use KiB/MiB/GiB/TiB)", unit)
 }
 
 func volumeList(addr string) error {
@@ -704,6 +785,51 @@ func splitAtDashDash(args []string) (pre, post []string) {
 		}
 	}
 	return args, nil
+}
+
+// frontLoadFlags reorders args so every leading-dash token comes before
+// any positional, preserving within-group order. Use AFTER joinValueFlags
+// so multi-token "--flag value" pairs are already a single "--flag=value"
+// token — otherwise this would separate them.
+func frontLoadFlags(args []string) []string {
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	for _, a := range args {
+		if len(a) > 1 && a[0] == '-' {
+			flags = append(flags, a)
+		} else {
+			positionals = append(positionals, a)
+		}
+	}
+	return append(flags, positionals...)
+}
+
+// joinValueFlags rewrites sequences like "--foo VAL" into "--foo=VAL" for
+// the named value-taking flags, so flag.Parse can recognize them even
+// when they appear after positional tokens (Go's flag.Parse stops at the
+// first non-flag without this).
+func joinValueFlags(args []string, valueFlags map[string]bool) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "--") && !strings.Contains(a, "=") {
+			name := a[2:]
+			if valueFlags[name] && i+1 < len(args) {
+				out = append(out, a+"="+args[i+1])
+				i++
+				continue
+			}
+		} else if strings.HasPrefix(a, "-") && len(a) > 1 && !strings.HasPrefix(a, "--") && !strings.Contains(a, "=") {
+			name := a[1:]
+			if valueFlags[name] && i+1 < len(args) {
+				out = append(out, a+"="+args[i+1])
+				i++
+				continue
+			}
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // partitionFlags separates leading-dash tokens from positional tokens while

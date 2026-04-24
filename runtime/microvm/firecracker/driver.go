@@ -147,9 +147,9 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 			kernelPath = SharedKernel
 		}
 		rootfsPath = SharedRootfs
-		pd, pl, err := d.buildPayloadDisk(parentCtx, w, vmDir)
+		pd, pl, err := d.preparePayloadDisk(parentCtx, w, vmDir)
 		if err != nil {
-			return fmt.Errorf("build payload disk: %w", err)
+			return fmt.Errorf("prepare payload disk: %w", err)
 		}
 		payloadDisk = pd
 		payload = pl
@@ -378,6 +378,10 @@ func (d *Driver) Remove(_ context.Context, name string) error {
 	if err := teardownTAP(tap); err != nil {
 		slog.Warn("tap teardown", "tap", tap, "err", err)
 	}
+
+	// Tear down the devmapper snapshot so its thin LV is returned to the
+	// pool. Safe to call unconditionally — idempotent when no snapshot.
+	d.releasePayloadSnapshot(context.Background(), name)
 
 	// Remove state dir.
 	_ = os.RemoveAll(filepath.Join(stateDir, name))

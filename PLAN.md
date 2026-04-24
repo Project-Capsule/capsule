@@ -11,12 +11,25 @@ Walk this checklist top-to-bottom on a running capsule and every item is a green
 - **MicroVMs** — Firecracker-backed, smolvm-style: shared rootfs + per-VM OCI payload ext4 + vsock agent. `capsulectl exec -t alpine-vm -- /bin/sh` gives you a real interactive shell inside runc inside the VM. `--serial` streams kernel+firecracker output for debugging.
 - **MicroVM port mapping** — iptables DNAT tagged with `capsule-vm:<workload>` comment; teardown finds + removes. Tested with nginx on :8080 reachable via curl.
 - **MicroVM NAT / DNS** — MASQUERADE rule for `172.20.0.0/16`; capsule-guest injects a default `/etc/resolv.conf` (`1.1.1.1`, `8.8.8.8`) into the OCI payload if absent.
-- **Volumes, unified** — raw ext4 at `/perm/volumes/<name>.ext4`. Containers loop-mount; VMs attach as virtio-blk. Same backing file, data moves between them.
+- **Volumes, unified** — thin LVs in VG `capsule` at `/dev/capsule/vol-<name>`, ext4 formatted. Containers mount directly; VMs attach as virtio-blk. Same block device, one mounter at a time.
+- **Storage substrate** — `/perm` is a plain LV in the capsule VG; user volumes are thin LVs in the sibling `thinpool`. VG is initialized on first boot if the PERM partition is blank. (VM payload disks are still flatten-to-ext4 today; unifying them into the thin pool is tracked in PLAN §4.)
 - **Lifecycle** — `workload stop / start / restart`; `desired_state=STOPPED` persists across capsule reboots.
 - **Logs + Exec** — container workloads via containerd; MicroVM workloads via the vsock agent (`capsule.v1.GuestAgent`). Same `capsulectl` commands, kind-transparent.
 - **Persistence** — SQLite at `/perm/state.db`. Workloads + volumes survive capsule reboots.
 
 ## Next (in rough priority order)
+
+### 0. Jailer hardening for Firecracker (HIGH PRIORITY)
+
+Today `runtime/microvm/firecracker/driver.go` launches the `firecracker` binary directly as a subprocess of capsuled (which runs as PID 1, root, all caps). We get KVM + Firecracker's built-in seccomp for free, and that's genuinely strong — but Firecracker ships a companion `jailer` binary (already installed in the image at `/usr/bin/jailer`) that we're not using. Wiring it up gives defense-in-depth if anyone ever finds a KVM escape:
+
+- chroot per VM
+- network / PID / mount namespaces around each VMM
+- cap drops (VMM stops being root)
+- cgroup memory/CPU limits on the VMM process
+- extra seccomp policy layer
+
+For single-tenant homelab the current setup is fine. This matters most if/when we run untrusted workloads, multi-tenant, or compliance-adjacent workloads. Not a rewrite — swap `fc.VMCommandBuilder{}.WithBin(...)` for the jailer path and configure `fc.Config.JailerCfg`. ~1 day of work.
 
 ### 1. Phase 3 — A/B OS updates
 
@@ -43,19 +56,43 @@ Today `:50000` is plaintext gRPC. For anything on a real network:
 
 Matches Talos's model. ~half-day.
 
-### 4. CLI polish
+### 4. Unify VM payload disks with the LVM thin pool
+
+**Natural follow-up to the LVM thin migration** — the user-volume half landed and was verified end-to-end on the VPS; the VM-payload half was explicitly deferred because of a containerd/LVM ownership clash documented below. Pick this up when you're next in the storage code; ~2 days of work on top of the groundwork already in place.
+
+Today user volumes live in the capsule VG's thin pool, but VM payload disks still go through the pre-LVM flatten-to-ext4 path (~30 s on alpine; no block-level CoW between identical VMs). The right architecture (fly.io pattern) is to put VM payloads in the same thin pool via containerd's devmapper snapshotter so 10 identical VMs share image blocks until they write.
+
+Blocker: containerd's devmapper snapshotter wants to own a thin pool's device-id allocation. LVM-managed pools don't expose the internal `-tpool` dm device usefully, and the LVM-visible pool LV rejects the thin-pool messages containerd sends. Fix is to create the thin pool via `dmsetup` directly (data + metadata LVs backing it, still LVM-managed, but the pool target itself is dmsetup-constructed). Then `pool_name` in containerd config matches a dm device containerd fully owns.
+
+Scope: rework `boot/boot_linux.go:initializeCapsuleVG` to create raw `thinmeta`/`thindata` LVs and then `dmsetup create capsule-thinpool` over them. Re-enable devmapper as default snapshotter in `image/etc/containerd-config.toml`. Revert `runtime/microvm/firecracker/image.go:preparePayloadDisk` to the snapshot-prepare path (git history has the version — the commit that this note first appeared in also contains the snapshot-based implementation that was reverted). Re-verify end-to-end on the VPS with two identical alpine VMs: the second should boot under 5 s and `lvs` should show the thin pool dedup'ing extents.
+
+### 5. Volume data lifecycle (builds on LVM thin)
+
+Now that `/perm` is an LVM thin pool and every volume is a thin LV, snapshot/backup/migration is mostly plumbing over existing LVM primitives. Rough order:
+
+- **Phase B — Local snapshots.** `capsulectl volume snapshot <vol> [--name v1]` → `lvcreate -s` (instant, thin, shares extents with source). `capsulectl volume snapshots list <vol>` and `volume restore <vol> <snap>` (creates a new LV from the snapshot). Retention rotation as a scheduled job. Same semantics as fly.io's default daily snapshots + 5-day retention.
+- **Phase C — Offline export/import.** `capsulectl volume export <vol> [--snapshot]` → snapshot then stream `dd | zstd` to stdout or an image file. Matching `volume import <name> <file>`. Covers the 90% "back this up somewhere" case — no new daemons, just shell-out pipelines.
+- **Phase D — Cross-capsule live migration (dm-clone + iSCSI).** Source exports the snapshot as an iSCSI LUN; destination stacks `dm-clone` over an empty LV with the iSCSI export as the remote source. VM boots immediately on the destination; blocks hydrate in the background. DISCARD pass-through on the guest short-circuits empty space. This is fly.io's machine-migration mechanism. ~2-3 weeks of real work, wait until there's actually a second capsule to migrate between.
+
+### 6. Low-priority cleanup
+
+Accumulated lint/dead code spotted in passing. Batch into a single cleanup PR when someone's in the area:
+- `runtime/container/driver.go` — unused `errNotFound` sentinel near EOF; unused `_ = strings.ToLower` import-suppression hack above it.
+- `boot/boot_linux.go:38` — `initPlatform(ctx)` takes a `context.Context` that's no longer used; either use it or drop it.
+- `boot/boot_linux.go:279` — switch `strings.Split` → `strings.SplitSeq` per analyzer (Go 1.25+ perf nit).
+
+### 7. CLI polish
 
 - `capsulectl workload list` should show declared port mappings (today they're only in `workload get`).
 - `capsulectl workload get` could print a human-friendly summary on top of the JSON.
-- `capsulectl volume mount <name> <path>` — loop-mount a volume on the capsule shell for inspection without a workload.
-- `capsulectl volume resize <name> <size>` — grow an ext4 file + resize2fs.
+- `capsulectl volume mount <name> <path>` — mount a volume LV on the capsule shell for inspection without a workload.
 - `--wait` flag on `apply` / `start` / `restart` — block until phase=Running.
 
-### 5. Fleet / multi-capsule CLI (Phase 5)
+### 8. Fleet / multi-capsule CLI (Phase 5)
 
 `capsulectl --capsule a.example.com,b.example.com workload list` — sequential fan-out, tabled output. `~/.config/capsule/config.yaml` with named capsules. Not a cluster yet, just fleet-of-identicals.
 
-### 6. Alternate MicroVM backends
+### 9. Alternate MicroVM backends
 
 Reserved slots in `MicroVMBackend`: `SMOLVM`, `QEMU`. Adding a QEMU driver unlocks **virtiofs** for volume sharing (if we ever want it) and **PCI passthrough** (for GPU/NIC workloads on real hardware).
 
@@ -79,9 +116,10 @@ Things that currently work but are brittle, hacky, or "good enough for now."
 
 ### Volumes
 
-- **Fixed 512 MiB size at create.** No resize RPC yet.
 - **No concurrent-mount protection beyond what the kernel gives you.** `volume list` shows `MOUNTED_BY` but nothing prevents a user from declaring the same volume on two containers; the second mount fails at runtime (ext4 refuses). Enforce at Apply time.
-- **`volume delete` after a crashed workload** may leave `/run/capsule/mounts/<workload>/` dirs. `unmountContainerVolumes` best-effort cleans these, but a stale loop device could linger. `losetup -a` will show any.
+- **`volume delete` after a crashed workload** may leave `/run/capsule/mounts/<workload>/` dirs. `unmountContainerVolumes` best-effort cleans these.
+- **Thin pool exhaustion is fatal.** Overcommitted volumes + a guest that fills one → pool ENOSPC → writes to *every* thin LV in the pool start failing. Need to configure `thin_pool_autoextend_threshold` / `thin_pool_autoextend_percent` in `/etc/lvm/lvm.conf` and expose pool fill % as a capsule metric. Capsule doesn't yet.
+- **Volume resize is grow-only.** `resize2fs` can shrink ext4 but requires `e2fsck -f` first and is dangerous; not exposed. Must be detached — the `refsTo` check enforces this.
 
 ### Build / dev loop
 
@@ -114,7 +152,6 @@ Things that currently work but are brittle, hacky, or "good enough for now."
 Things people ask for that are intentionally out of scope for Capsule:
 
 - **Kubernetes compatibility.** Capsule is a smaller shape on purpose. If you want k8s, run k3s inside a capsule.
-- **Live migration.** VMs run where they run.
 - **Autoscaling.** That's the future orchestrator's job, not the capsule's.
 - **Web UI.** Capsule is CLI / API first; a UI on top is welcome as a separate project.
 - **Cluster gossip in v1.** Each capsule is its own island. The operator's CLI fans out; no peer-to-peer discovery.
