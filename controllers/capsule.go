@@ -90,14 +90,27 @@ func (c *CapsuleController) GetInfo(ctx context.Context, _ *capsulev1.GetInfoReq
 	u := uname()
 	uptime := uptimeSeconds()
 
+	memTotal, memAvail := memInfo()
+	cpuCores, cpuModel := cpuInfo()
+	diskPath, diskTotal := diskInfo()
+	poolTotal, poolUsed := thinpoolUsage()
+
 	resp := &capsulev1.GetInfoResponse{
-		Hostname:       hostname,
-		KernelRelease:  u.release,
-		KernelVersion:  u.version,
-		Architecture:   u.machine,
-		UptimeSeconds:  uptime,
-		CapsuleVersion: c.CapsuleVersion,
-		ActiveSlot:     c.ActiveSlot,
+		Hostname:             hostname,
+		KernelRelease:        u.release,
+		KernelVersion:        u.version,
+		Architecture:         u.machine,
+		UptimeSeconds:        uptime,
+		CapsuleVersion:       c.CapsuleVersion,
+		ActiveSlot:           c.ActiveSlot,
+		MemoryTotalBytes:     memTotal,
+		MemoryAvailableBytes: memAvail,
+		CpuCores:             cpuCores,
+		CpuModel:             cpuModel,
+		BootDisk:             diskPath,
+		DiskTotalBytes:       diskTotal,
+		ThinpoolTotalBytes:   poolTotal,
+		ThinpoolUsedBytes:    poolUsed,
 	}
 	if c.OSStateStore != nil {
 		st, err := c.OSStateStore.Get(ctx)

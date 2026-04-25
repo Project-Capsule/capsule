@@ -82,9 +82,29 @@ type GetInfoResponse struct {
 	// back if no UpdateConfirm arrives. Zero when no update is pending.
 	PendingDeadlineUnix int64 `protobuf:"varint,9,opt,name=pending_deadline_unix,json=pendingDeadlineUnix,proto3" json:"pending_deadline_unix,omitempty"`
 	// VERSION string from the most recently committed (or pending) bundle.
-	LastVersion   string `protobuf:"bytes,10,opt,name=last_version,json=lastVersion,proto3" json:"last_version,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	LastVersion string `protobuf:"bytes,10,opt,name=last_version,json=lastVersion,proto3" json:"last_version,omitempty"`
+	// Total RAM (MemTotal from /proc/meminfo).
+	MemoryTotalBytes uint64 `protobuf:"varint,11,opt,name=memory_total_bytes,json=memoryTotalBytes,proto3" json:"memory_total_bytes,omitempty"`
+	// RAM currently available — sum of free + reclaimable caches
+	// (MemAvailable from /proc/meminfo). What you'd actually be able to
+	// allocate without hitting swap.
+	MemoryAvailableBytes uint64 `protobuf:"varint,12,opt,name=memory_available_bytes,json=memoryAvailableBytes,proto3" json:"memory_available_bytes,omitempty"`
+	// CPU logical core count.
+	CpuCores uint32 `protobuf:"varint,13,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`
+	// CPU model name from /proc/cpuinfo (first hit).
+	CpuModel string `protobuf:"bytes,14,opt,name=cpu_model,json=cpuModel,proto3" json:"cpu_model,omitempty"`
+	// Boot disk device path (e.g. "/dev/vda", "/dev/nvme0n1").
+	BootDisk string `protobuf:"bytes,15,opt,name=boot_disk,json=bootDisk,proto3" json:"boot_disk,omitempty"`
+	// Boot disk total size in bytes (BLKGETSIZE64).
+	DiskTotalBytes uint64 `protobuf:"varint,16,opt,name=disk_total_bytes,json=diskTotalBytes,proto3" json:"disk_total_bytes,omitempty"`
+	// LVM thin-pool data capacity. The thin pool backs every user volume,
+	// so this is the practical "how much volume space the capsule has".
+	ThinpoolTotalBytes uint64 `protobuf:"varint,17,opt,name=thinpool_total_bytes,json=thinpoolTotalBytes,proto3" json:"thinpool_total_bytes,omitempty"`
+	// LVM thin-pool data currently allocated. Capsule fills up when this
+	// approaches thinpool_total_bytes.
+	ThinpoolUsedBytes uint64 `protobuf:"varint,18,opt,name=thinpool_used_bytes,json=thinpoolUsedBytes,proto3" json:"thinpool_used_bytes,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *GetInfoResponse) Reset() {
@@ -185,6 +205,62 @@ func (x *GetInfoResponse) GetLastVersion() string {
 		return x.LastVersion
 	}
 	return ""
+}
+
+func (x *GetInfoResponse) GetMemoryTotalBytes() uint64 {
+	if x != nil {
+		return x.MemoryTotalBytes
+	}
+	return 0
+}
+
+func (x *GetInfoResponse) GetMemoryAvailableBytes() uint64 {
+	if x != nil {
+		return x.MemoryAvailableBytes
+	}
+	return 0
+}
+
+func (x *GetInfoResponse) GetCpuCores() uint32 {
+	if x != nil {
+		return x.CpuCores
+	}
+	return 0
+}
+
+func (x *GetInfoResponse) GetCpuModel() string {
+	if x != nil {
+		return x.CpuModel
+	}
+	return ""
+}
+
+func (x *GetInfoResponse) GetBootDisk() string {
+	if x != nil {
+		return x.BootDisk
+	}
+	return ""
+}
+
+func (x *GetInfoResponse) GetDiskTotalBytes() uint64 {
+	if x != nil {
+		return x.DiskTotalBytes
+	}
+	return 0
+}
+
+func (x *GetInfoResponse) GetThinpoolTotalBytes() uint64 {
+	if x != nil {
+		return x.ThinpoolTotalBytes
+	}
+	return 0
+}
+
+func (x *GetInfoResponse) GetThinpoolUsedBytes() uint64 {
+	if x != nil {
+		return x.ThinpoolUsedBytes
+	}
+	return 0
 }
 
 type CapsuleLogsRequest struct {
@@ -582,7 +658,7 @@ const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\n" +
 	"\x18capsule/v1/capsule.proto\x12\n" +
 	"capsule.v1\"\x10\n" +
-	"\x0eGetInfoRequest\"\x8a\x03\n" +
+	"\x0eGetInfoRequest\"\xd1\x05\n" +
 	"\x0fGetInfoResponse\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12%\n" +
 	"\x0ekernel_release\x18\x02 \x01(\tR\rkernelRelease\x12%\n" +
@@ -595,7 +671,15 @@ const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\fpending_slot\x18\b \x01(\tR\vpendingSlot\x122\n" +
 	"\x15pending_deadline_unix\x18\t \x01(\x03R\x13pendingDeadlineUnix\x12!\n" +
 	"\flast_version\x18\n" +
-	" \x01(\tR\vlastVersion\"K\n" +
+	" \x01(\tR\vlastVersion\x12,\n" +
+	"\x12memory_total_bytes\x18\v \x01(\x04R\x10memoryTotalBytes\x124\n" +
+	"\x16memory_available_bytes\x18\f \x01(\x04R\x14memoryAvailableBytes\x12\x1b\n" +
+	"\tcpu_cores\x18\r \x01(\rR\bcpuCores\x12\x1b\n" +
+	"\tcpu_model\x18\x0e \x01(\tR\bcpuModel\x12\x1b\n" +
+	"\tboot_disk\x18\x0f \x01(\tR\bbootDisk\x12(\n" +
+	"\x10disk_total_bytes\x18\x10 \x01(\x04R\x0ediskTotalBytes\x120\n" +
+	"\x14thinpool_total_bytes\x18\x11 \x01(\x04R\x12thinpoolTotalBytes\x12.\n" +
+	"\x13thinpool_used_bytes\x18\x12 \x01(\x04R\x11thinpoolUsedBytes\"K\n" +
 	"\x12CapsuleLogsRequest\x12\x16\n" +
 	"\x06follow\x18\x01 \x01(\bR\x06follow\x12\x1d\n" +
 	"\n" +

@@ -292,7 +292,7 @@ func capsuleInfo(addr string) error {
 		fmt.Printf("  kernel_release:  %s\n", resp.KernelRelease)
 		fmt.Printf("  kernel_version:  %s\n", resp.KernelVersion)
 		fmt.Printf("  architecture:    %s\n", resp.Architecture)
-		fmt.Printf("  uptime_seconds:  %d\n", resp.UptimeSeconds)
+		fmt.Printf("  uptime:          %s\n", formatUptime(resp.UptimeSeconds))
 		fmt.Printf("  capsule_version: %s\n", resp.CapsuleVersion)
 		fmt.Printf("  active_slot:     %s\n", resp.ActiveSlot)
 		if resp.LastVersion != "" {
@@ -306,8 +306,53 @@ func capsuleInfo(addr string) error {
 			}
 			fmt.Printf("  pending_slot:    %s (%s — run `capsule update confirm` to commit)\n", resp.PendingSlot, marker)
 		}
+		if resp.CpuCores > 0 {
+			model := resp.CpuModel
+			if model == "" {
+				model = "(unknown model)"
+			}
+			fmt.Printf("  cpu:             %d core(s) — %s\n", resp.CpuCores, model)
+		}
+		if resp.MemoryTotalBytes > 0 {
+			used := resp.MemoryTotalBytes - resp.MemoryAvailableBytes
+			fmt.Printf("  memory:          %s used / %s total (%.0f%% available)\n",
+				humanBytes(used), humanBytes(resp.MemoryTotalBytes),
+				100.0*float64(resp.MemoryAvailableBytes)/float64(resp.MemoryTotalBytes))
+		}
+		if resp.DiskTotalBytes > 0 {
+			fmt.Printf("  disk:            %s — %s total\n", resp.BootDisk, humanBytes(resp.DiskTotalBytes))
+		}
+		if resp.ThinpoolTotalBytes > 0 {
+			pct := 100.0 * float64(resp.ThinpoolUsedBytes) / float64(resp.ThinpoolTotalBytes)
+			fmt.Printf("  volume pool:     %s used / %s total (%.1f%% full)\n",
+				humanBytes(resp.ThinpoolUsedBytes), humanBytes(resp.ThinpoolTotalBytes), pct)
+		}
 		return nil
 	})
+}
+
+// formatUptime renders seconds as "Xd Yh Zm Ss" trimmed to the largest
+// nonzero unit.
+func formatUptime(secs uint64) string {
+	if secs == 0 {
+		return "0s"
+	}
+	d := secs / 86400
+	h := (secs % 86400) / 3600
+	m := (secs % 3600) / 60
+	s := secs % 60
+	parts := []string{}
+	if d > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", d))
+	}
+	if h > 0 || d > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", h))
+	}
+	if m > 0 || h > 0 || d > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", m))
+	}
+	parts = append(parts, fmt.Sprintf("%ds", s))
+	return strings.Join(parts, " ")
 }
 
 // --- capsule update --------------------------------------------------------

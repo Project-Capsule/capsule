@@ -55,6 +55,30 @@ message GetInfoResponse {
   int64 pending_deadline_unix = 9;
   // VERSION string from the most recently committed (or pending) bundle.
   string last_version = 10;
+
+  // Resource snapshot for `capsulectl capsule info`. All bytes; zero
+  // means "couldn't read" (e.g. dev-mode capsuled, or missing /proc).
+
+  // Total RAM (MemTotal from /proc/meminfo).
+  uint64 memory_total_bytes = 11;
+  // RAM currently available — sum of free + reclaimable caches
+  // (MemAvailable from /proc/meminfo). What you'd actually be able to
+  // allocate without hitting swap.
+  uint64 memory_available_bytes = 12;
+  // CPU logical core count.
+  uint32 cpu_cores = 13;
+  // CPU model name from /proc/cpuinfo (first hit).
+  string cpu_model = 14;
+  // Boot disk device path (e.g. "/dev/vda", "/dev/nvme0n1").
+  string boot_disk = 15;
+  // Boot disk total size in bytes (BLKGETSIZE64).
+  uint64 disk_total_bytes = 16;
+  // LVM thin-pool data capacity. The thin pool backs every user volume,
+  // so this is the practical "how much volume space the capsule has".
+  uint64 thinpool_total_bytes = 17;
+  // LVM thin-pool data currently allocated. Capsule fills up when this
+  // approaches thinpool_total_bytes.
+  uint64 thinpool_used_bytes = 18;
 }
 
 message CapsuleLogsRequest {
