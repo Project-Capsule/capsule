@@ -27,6 +27,13 @@ const (
 	DesiredState_DESIRED_STATE_UNSPECIFIED DesiredState = 0 // treated as RUNNING
 	DesiredState_DESIRED_STATE_RUNNING     DesiredState = 1
 	DesiredState_DESIRED_STATE_STOPPED     DesiredState = 2
+	// Tombstone marker set by Service.Delete before driver.Remove. The
+	// reconciler skips workloads in this state (won't restart them, won't
+	// try to stop them — they're being torn down). On successful Remove,
+	// the row gets deleted; on failure, the row stays at DELETING so a
+	// retry of `workload delete` finishes the job without needing to
+	// re-set the marker.
+	DesiredState_DESIRED_STATE_DELETING DesiredState = 3
 )
 
 // Enum value maps for DesiredState.
@@ -35,11 +42,13 @@ var (
 		0: "DESIRED_STATE_UNSPECIFIED",
 		1: "DESIRED_STATE_RUNNING",
 		2: "DESIRED_STATE_STOPPED",
+		3: "DESIRED_STATE_DELETING",
 	}
 	DesiredState_value = map[string]int32{
 		"DESIRED_STATE_UNSPECIFIED": 0,
 		"DESIRED_STATE_RUNNING":     1,
 		"DESIRED_STATE_STOPPED":     2,
+		"DESIRED_STATE_DELETING":    3,
 	}
 )
 
@@ -426,7 +435,23 @@ type ContainerSpec struct {
 	// loopback (the container can talk to itself and nothing else).
 	NetworkMode NetworkMode `protobuf:"varint,6,opt,name=network_mode,json=networkMode,proto3,enum=capsule.v1.NetworkMode" json:"network_mode,omitempty"`
 	// Port mappings. Only meaningful when network_mode == BRIDGE.
-	Ports         []*PortMapping `protobuf:"bytes,7,rep,name=ports,proto3" json:"ports,omitempty"`
+	Ports []*PortMapping `protobuf:"bytes,7,rep,name=ports,proto3" json:"ports,omitempty"`
+	// Run with all caps + raw access to /dev + relaxed seccomp/AppArmor.
+	// Equivalent to docker run --privileged.
+	Privileged bool `protobuf:"varint,8,opt,name=privileged,proto3" json:"privileged,omitempty"`
+	// Share the host PID namespace — process list inside the container
+	// sees capsuled, containerd, runc, firecracker, etc.
+	HostPid bool `protobuf:"varint,9,opt,name=host_pid,json=hostPid,proto3" json:"host_pid,omitempty"`
+	// Share the host mount namespace. Bind-mounts done inside the container
+	// become visible to the host (and vice versa). Use sparingly.
+	HostMount bool `protobuf:"varint,10,opt,name=host_mount,json=hostMount,proto3" json:"host_mount,omitempty"`
+	// Share the host IPC namespace.
+	HostIpc bool `protobuf:"varint,11,opt,name=host_ipc,json=hostIpc,proto3" json:"host_ipc,omitempty"`
+	// Bind-mount these absolute paths from the host into the container at
+	// the same path. Read-write. Used by capsule debug to expose /perm,
+	// /sys, /dev, /run/capsule, /usr/sbin (so host's lvs/iptables/etc.
+	// work without being shipped in the debug image).
+	HostBindPaths []string `protobuf:"bytes,12,rep,name=host_bind_paths,json=hostBindPaths,proto3" json:"host_bind_paths,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -506,6 +531,41 @@ func (x *ContainerSpec) GetNetworkMode() NetworkMode {
 func (x *ContainerSpec) GetPorts() []*PortMapping {
 	if x != nil {
 		return x.Ports
+	}
+	return nil
+}
+
+func (x *ContainerSpec) GetPrivileged() bool {
+	if x != nil {
+		return x.Privileged
+	}
+	return false
+}
+
+func (x *ContainerSpec) GetHostPid() bool {
+	if x != nil {
+		return x.HostPid
+	}
+	return false
+}
+
+func (x *ContainerSpec) GetHostMount() bool {
+	if x != nil {
+		return x.HostMount
+	}
+	return false
+}
+
+func (x *ContainerSpec) GetHostIpc() bool {
+	if x != nil {
+		return x.HostIpc
+	}
+	return false
+}
+
+func (x *ContainerSpec) GetHostBindPaths() []string {
+	if x != nil {
+		return x.HostBindPaths
 	}
 	return nil
 }
@@ -1879,7 +1939,7 @@ const file_capsule_v1_workload_proto_rawDesc = "" +
 	"\tcontainer\x18\x03 \x01(\v2\x19.capsule.v1.ContainerSpecR\tcontainer\x122\n" +
 	"\bmicro_vm\x18\x04 \x01(\v2\x17.capsule.v1.MicroVMSpecR\amicroVm\x122\n" +
 	"\x06status\x18\x05 \x01(\v2\x1a.capsule.v1.WorkloadStatusR\x06status\x12=\n" +
-	"\rdesired_state\x18\x06 \x01(\x0e2\x18.capsule.v1.DesiredStateR\fdesiredState\"\xdd\x02\n" +
+	"\rdesired_state\x18\x06 \x01(\x0e2\x18.capsule.v1.DesiredStateR\fdesiredState\"\xfa\x03\n" +
 	"\rContainerSpec\x12\x14\n" +
 	"\x05image\x18\x01 \x01(\tR\x05image\x12\x18\n" +
 	"\acommand\x18\x02 \x03(\tR\acommand\x12\x12\n" +
@@ -1887,7 +1947,16 @@ const file_capsule_v1_workload_proto_rawDesc = "" +
 	"\x03env\x18\x04 \x03(\v2\".capsule.v1.ContainerSpec.EnvEntryR\x03env\x12/\n" +
 	"\x06mounts\x18\x05 \x03(\v2\x17.capsule.v1.VolumeMountR\x06mounts\x12:\n" +
 	"\fnetwork_mode\x18\x06 \x01(\x0e2\x17.capsule.v1.NetworkModeR\vnetworkMode\x12-\n" +
-	"\x05ports\x18\a \x03(\v2\x17.capsule.v1.PortMappingR\x05ports\x1a6\n" +
+	"\x05ports\x18\a \x03(\v2\x17.capsule.v1.PortMappingR\x05ports\x12\x1e\n" +
+	"\n" +
+	"privileged\x18\b \x01(\bR\n" +
+	"privileged\x12\x19\n" +
+	"\bhost_pid\x18\t \x01(\bR\ahostPid\x12\x1d\n" +
+	"\n" +
+	"host_mount\x18\n" +
+	" \x01(\bR\thostMount\x12\x19\n" +
+	"\bhost_ipc\x18\v \x01(\bR\ahostIpc\x12&\n" +
+	"\x0fhost_bind_paths\x18\f \x03(\tR\rhostBindPaths\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"m\n" +
@@ -1976,11 +2045,12 @@ const file_capsule_v1_workload_proto_rawDesc = "" +
 	"\x14WorkloadStopResponse\"*\n" +
 	"\x14WorkloadStartRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x17\n" +
-	"\x15WorkloadStartResponse*c\n" +
+	"\x15WorkloadStartResponse*\x7f\n" +
 	"\fDesiredState\x12\x1d\n" +
 	"\x19DESIRED_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15DESIRED_STATE_RUNNING\x10\x01\x12\x19\n" +
-	"\x15DESIRED_STATE_STOPPED\x10\x02*f\n" +
+	"\x15DESIRED_STATE_STOPPED\x10\x02\x12\x1a\n" +
+	"\x16DESIRED_STATE_DELETING\x10\x03*f\n" +
 	"\fWorkloadKind\x12\x1d\n" +
 	"\x19WORKLOAD_KIND_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17WORKLOAD_KIND_CONTAINER\x10\x01\x12\x1a\n" +

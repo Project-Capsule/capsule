@@ -96,6 +96,10 @@ Accumulated lint/dead code spotted in passing. Batch into a single cleanup PR wh
 
 Reserved slots in `MicroVMBackend`: `SMOLVM`, `QEMU`. Adding a QEMU driver unlocks **virtiofs** for volume sharing (if we ever want it) and **PCI passthrough** (for GPU/NIC workloads on real hardware).
 
+### 10. Prebuilt capsule-debug image
+
+`capsulectl capsule debug` currently uses `alpine:3.20` and tells the operator to `apk add lvm2 e2fsprogs iptables iproute2` once they're inside. That works (lvm2 etc. happily talk to the host's LVM via the bind-mounted /dev + /sys + /perm) but adds 5–10 seconds to the first session and needs network access to dl-cdn.alpinelinux.org. Replace with a small purpose-built image we publish to a registry — `ghcr.io/<org>/capsule-debug:<version>` — with the toolchain baked in: `lvm2`, `e2fsprogs`, `iptables`, `iproute2`, `util-linux`, `blkid`, `strace`, `tcpdump`, `lsof`, plus host bin compatibility (the bind-mounted host /sbin/lvs etc. work directly when the image's libdir matches Alpine's). Make the default image override-able with `--image` so operators can use their own. Keep the alpine fallback documented for air-gapped environments.
+
 ## Gotchas to clean up
 
 Things that currently work but are brittle, hacky, or "good enough for now."

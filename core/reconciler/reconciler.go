@@ -67,6 +67,12 @@ func (r *Reconciler) Tick(ctx context.Context) {
 func (r *Reconciler) reconcileOne(ctx context.Context, w *capsulev1.Workload) {
 	name := w.GetName()
 
+	// Tombstone — Service.Delete is in the middle of tearing this down
+	// and will remove the row when it's safe. Don't touch.
+	if w.GetDesiredState() == capsulev1.DesiredState_DESIRED_STATE_DELETING {
+		return
+	}
+
 	// Honor desired_state=STOPPED: ensure runtime state is torn down and
 	// keep it that way. Default UNSPECIFIED is treated as RUNNING so
 	// existing workloads keep working after the upgrade.

@@ -161,6 +161,30 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 		// Leave containerd's default: private netns with only loopback.
 	}
 
+	// Debug / breakglass: privileged + host-namespace flags. Used by
+	// `capsulectl capsule debug` to drop into a shell with full access to
+	// the host (capsuled, /perm, LVM, /proc, …). Equivalent shape to
+	// `docker run --privileged --pid=host --ipc=host -v /:/host`.
+	if spec.GetPrivileged() {
+		specOpts = append(specOpts,
+			oci.WithPrivileged,
+			oci.WithAllDevicesAllowed,
+			oci.WithHostDevices,
+		)
+	}
+	if spec.GetHostPid() {
+		specOpts = append(specOpts, oci.WithHostNamespace(specs.PIDNamespace))
+	}
+	if spec.GetHostMount() {
+		specOpts = append(specOpts, oci.WithHostNamespace(specs.MountNamespace))
+	}
+	if spec.GetHostIpc() {
+		specOpts = append(specOpts, oci.WithHostNamespace(specs.IPCNamespace))
+	}
+	if hostBinds := hostBindMounts(spec.GetHostBindPaths()); len(hostBinds) > 0 {
+		specOpts = append(specOpts, oci.WithMounts(hostBinds))
+	}
+
 	// Attach a label indicating network mode so Remove can make the right
 	// teardown decisions without consulting external state.
 	containerOpts := []containerd.NewContainerOpts{
@@ -319,6 +343,21 @@ func (d *Driver) Remove(parentCtx context.Context, name string) error {
 		if needsCNI {
 			if terr := d.cniTeardown(ctx, name, task.Pid()); terr != nil {
 				slog.Warn("cni teardown", "workload", name, "err", terr)
+			}
+		}
+		// SIGKILL with WithKillAll reaches every process in the cgroup,
+		// including any open `exec` sessions. Without WithKillAll, exec
+		// processes survive and `task.Delete` fails with "failed
+		// precondition: cannot delete running task" — bites the
+		// `capsule debug` cleanup path most reliably.
+		_ = task.Kill(ctx, syscall.SIGKILL, containerd.WithKillAll)
+		// Wait briefly for the task to exit. Bounded so a stuck process
+		// doesn't block Remove indefinitely; we still try Delete.
+		if statusCh, werr := task.Wait(ctx); werr == nil {
+			select {
+			case <-statusCh:
+			case <-time.After(5 * time.Second):
+				slog.Warn("task did not exit within 5s", "workload", name)
 			}
 		}
 		if _, derr := task.Delete(ctx, containerd.WithProcessKill); derr != nil {
@@ -554,6 +593,27 @@ func unmountContainerVolumes(workload string, mounted map[string]string) {
 		_ = os.Remove(mp)
 	}
 	_ = os.Remove(filepath.Join(volumeMountDir, workload))
+}
+
+// hostBindMounts translates spec.host_bind_paths into rbind mounts that
+// expose host paths into the container at the same path. Used by the
+// debug container to surface /perm, /sys, /dev, /run/capsule, /usr/sbin
+// without baking them into the debug image. Skips empty / non-absolute
+// entries silently — operator-supplied data, treat defensively.
+func hostBindMounts(paths []string) []specs.Mount {
+	var out []specs.Mount
+	for _, p := range paths {
+		if p == "" || !strings.HasPrefix(p, "/") {
+			continue
+		}
+		out = append(out, specs.Mount{
+			Type:        "bind",
+			Source:      p,
+			Destination: p,
+			Options:     []string{"rbind", "rw"},
+		})
+	}
+	return out
 }
 
 // bindMounts translates workload VolumeMounts into OCI bind-mount specs.

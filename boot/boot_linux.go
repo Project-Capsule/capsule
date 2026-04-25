@@ -31,6 +31,10 @@ var earlyMounts = []mountSpec{
 	{source: "proc", target: "/proc", fstype: "proc", flags: unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC, required: true},
 	{source: "sysfs", target: "/sys", fstype: "sysfs", flags: unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC, required: true},
 	{source: "devtmpfs", target: "/dev", fstype: "devtmpfs", flags: unix.MS_NOSUID, data: "mode=0755", required: true},
+	// devpts gets us /dev/pts/<N> + /dev/ptmx for PTY allocation. Required
+	// for any `exec -t` call, including the debug container's interactive
+	// shell when it shares the host mount namespace.
+	{source: "devpts", target: "/dev/pts", fstype: "devpts", flags: unix.MS_NOSUID | unix.MS_NOEXEC, data: "newinstance,ptmxmode=0666,mode=0620,gid=5"},
 	{source: "tmpfs", target: "/run", fstype: "tmpfs", flags: unix.MS_NOSUID | unix.MS_NODEV, data: "mode=0755"},
 	{source: "tmpfs", target: "/tmp", fstype: "tmpfs", flags: unix.MS_NOSUID | unix.MS_NODEV, data: "mode=1777"},
 	{source: "cgroup2", target: "/sys/fs/cgroup", fstype: "cgroup2", flags: unix.MS_NOSUID | unix.MS_NODEV | unix.MS_NOEXEC},
@@ -49,6 +53,16 @@ func initPlatform(ctx context.Context) (Result, error) {
 				return res, fmt.Errorf("mount %s -> %s: %w", m.source, m.target, err)
 			}
 			slog.Warn("optional mount failed", "target", m.target, "err", err)
+		}
+	}
+
+	// /dev/ptmx is the canonical path programs use to allocate a PTY
+	// (openpty(3) etc.). Convention is for it to symlink to
+	// /dev/pts/ptmx, which devpts creates. devtmpfs's /dev doesn't
+	// pre-create this symlink; we do it after mounting devpts.
+	if _, err := os.Lstat("/dev/ptmx"); os.IsNotExist(err) {
+		if err := os.Symlink("/dev/pts/ptmx", "/dev/ptmx"); err != nil {
+			slog.Warn("create /dev/ptmx symlink failed", "err", err)
 		}
 	}
 

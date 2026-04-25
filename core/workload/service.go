@@ -71,14 +71,28 @@ func (s *Service) List(ctx context.Context) ([]*capsulev1.Workload, error) {
 // Delete removes a workload from the store AND asks the appropriate
 // runtime to tear down any corresponding resources. Safe on missing name.
 func (s *Service) Delete(ctx context.Context, name string) error {
-	// Look up kind first so we know which driver(s) to call; a workload
-	// can only be one kind at a time, but if we don't find it in the
-	// store we still make a best-effort attempt against both drivers
-	// (useful when the store got ahead of the runtime state).
+	// Look up kind so we know which driver to call. Missing in store
+	// (already-deleted row, or never existed) → best-effort against
+	// the container driver.
 	w, err := s.store.Workloads().Get(ctx, name)
 	var kind capsulev1.WorkloadKind
 	if err == nil && w != nil {
 		kind = w.GetKind()
+	}
+
+	// Mark the row as DELETING before touching the runtime so the
+	// reconciler stops trying to keep it Running. This avoids the
+	// classic race: driver.Remove takes a couple of seconds to SIGKILL
+	// + unmount + delete; the reconciler ticks in the gap, sees
+	// desired=Running, and starts a fresh container before our Remove
+	// completes. If Remove fails, the row stays at DELETING — operator
+	// can retry `workload delete` and it finishes cleanly without
+	// re-applying the marker.
+	if w != nil && w.GetDesiredState() != capsulev1.DesiredState_DESIRED_STATE_DELETING {
+		w.DesiredState = capsulev1.DesiredState_DESIRED_STATE_DELETING
+		if err := s.store.Workloads().Put(ctx, w); err != nil {
+			return fmt.Errorf("mark workload %q deleting: %w", name, err)
+		}
 	}
 
 	switch kind {
@@ -95,6 +109,7 @@ func (s *Service) Delete(ctx context.Context, name string) error {
 			}
 		}
 	}
+	// Runtime is gone (or never existed). Drop the store row.
 	return s.store.Workloads().Delete(ctx, name)
 }
 

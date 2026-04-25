@@ -51,6 +51,18 @@ func main() {
 			break
 		}
 		err = capsuleUpdate(*addr, subArgs[0], subArgs[1:])
+	case "capsule debug":
+		// `capsule debug [-i <image>] [--keep] [-- <cmd> [args...]]`
+		preDash, postDash := splitAtDashDash(subArgs)
+		fs := flag.NewFlagSet("capsule debug", flag.ExitOnError)
+		image := fs.String("i", "docker.io/library/alpine:3.20", "image for the debug container")
+		keep := fs.Bool("keep", false, "leave the debug workload running on exit")
+		_ = fs.Parse(preDash)
+		cmdArgs := postDash
+		if len(cmdArgs) == 0 {
+			cmdArgs = []string{"/bin/sh"}
+		}
+		err = capsuleDebug(*addr, *image, *keep, cmdArgs)
 	case "capsule logs":
 		fs := flag.NewFlagSet("capsule logs", flag.ExitOnError)
 		follow := fs.Bool("f", false, "stream new output until Ctrl-C")
@@ -204,6 +216,7 @@ Usage:
   capsulectl [--capsule host:port] capsule logs [-f] [-n N]
   capsulectl [--capsule host:port] capsule update push <bundle.tar> [--auto-confirm=N]
   capsulectl [--capsule host:port] capsule update confirm
+  capsulectl [--capsule host:port] capsule debug [-i <image>] [--keep] [-- <cmd> [args...]]
   capsulectl [--capsule host:port] workload apply -f <manifest.yaml>
   capsulectl [--capsule host:port] workload list
   capsulectl [--capsule host:port] workload get <name>
@@ -353,6 +366,104 @@ func formatUptime(secs uint64) string {
 	}
 	parts = append(parts, fmt.Sprintf("%ds", s))
 	return strings.Join(parts, " ")
+}
+
+// --- capsule debug ---------------------------------------------------------
+
+// capsuleDebug deploys a transient privileged container with the host's
+// PID/IPC/mount namespaces shared and /perm + /sys + /dev + /run/capsule
+// + /usr/sbin bind-mounted, then exec's into it for an interactive shell.
+// On exit, deletes the workload unless --keep was passed. This is the
+// breakglass path for "something's broken on the capsule and I need to
+// poke at it" — equivalent to gokrazy's `breakglass` or the `kubectl
+// debug node` pattern.
+//
+// Anyone who can reach :50000 can root the host this way; mTLS is a hard
+// prereq before exposing the capsule on a hostile network (PLAN §3).
+func capsuleDebug(addr, image string, keep bool, cmdArgs []string) error {
+	const name = "capsule-debug"
+	w := &capsulev1.Workload{
+		Name: name,
+		Kind: capsulev1.WorkloadKind_WORKLOAD_KIND_CONTAINER,
+		Container: &capsulev1.ContainerSpec{
+			Image:       image,
+			Command:     []string{"/bin/sh", "-c"},
+			Args:        []string{"sleep infinity"},
+			NetworkMode: capsulev1.NetworkMode_NETWORK_MODE_HOST,
+			Privileged:  true,
+			HostPid:     true,
+			// Deliberately NOT setting HostMount — keep the container in
+			// its own mount namespace so the bind mounts below stay
+			// scoped to it. With HostMount=true, OCI WithMounts runs in
+			// the host ns, leaving bind mounts pinned to the rootfs that
+			// containerd later refuses to unmount. The bind paths still
+			// give us full visibility into /perm + LVM + capsuled state.
+			HostBindPaths: []string{
+				"/perm",
+				"/sys",
+				"/dev",
+				"/run/capsule",
+				// Bind /sbin so /sbin/lvs (and the host's iptables/ip/mount/
+				// e2fsck) work without being shipped in the debug image.
+				"/sbin",
+				"/usr/sbin",
+				"/usr/bin",
+			},
+		},
+	}
+
+	conn, err := dial(addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	wsclient := capsulev1.NewWorkloadServiceClient(conn)
+
+	// Apply (replaces if it already exists from a previous session).
+	if err := withCtx(func(ctx context.Context) error {
+		_, err := wsclient.Apply(ctx, &capsulev1.WorkloadApplyRequest{Workload: w})
+		return err
+	}); err != nil {
+		return fmt.Errorf("apply debug workload: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "debug session — host /perm + /sys + /dev are bind-mounted; host PID ns shared.\n")
+	fmt.Fprintf(os.Stderr, "for LVM/iptables/blkid run `apk add lvm2 e2fsprogs iptables iproute2` first;\n")
+	fmt.Fprintf(os.Stderr, "future: a prebuilt capsule-debug image with the toolchain baked in (PLAN §).\n\n")
+
+	// Wait for Running. Bound at 60 s — image pull + start should be quick.
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		w, err := wsclient.Get(ctx, &capsulev1.WorkloadGetRequest{Name: name})
+		cancel()
+		if err == nil && w.GetStatus().GetPhase() == capsulev1.WorkloadPhase_WORKLOAD_PHASE_RUNNING {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	// Exec into the container with a TTY. Use the Core variant — the
+	// CLI wrapper calls os.Exit which would skip our cleanup defer.
+	exitCode, execErr := workloadExecCore(addr, name, cmdArgs, true)
+
+	// Cleanup (unless --keep). Service.Delete now marks DELETING first
+	// so the reconciler stops touching the workload before driver.Remove
+	// runs — no race that re-creates the container behind our back.
+	if !keep {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if _, err := wsclient.Delete(ctx, &capsulev1.WorkloadDeleteRequest{Name: name}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: delete debug workload: %v\n", err)
+		}
+		cancel()
+	}
+
+	if execErr != nil {
+		return execErr
+	}
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
+	return nil
 }
 
 // --- capsule update --------------------------------------------------------
@@ -757,10 +868,29 @@ func workloadLogs(addr, name string, follow bool, tail int, serial bool) error {
 
 // --- workload exec ---------------------------------------------------------
 
+// workloadExec is the convenience wrapper for the `workload exec`
+// subcommand: runs the exec, then os.Exit's with the remote exit code so
+// shell pipelines see the right status. Calls workloadExecCore under the
+// hood. Uses os.Exit because the stdin goroutine (in raw-tty mode) is
+// blocked on Read and would delay normal return — but that means defers
+// in callers DO NOT run. If you need cleanup before exit (e.g. capsule
+// debug), call workloadExecCore directly and handle the exit yourself.
 func workloadExec(addr, name string, command []string, tty bool) error {
-	conn, err := dial(addr)
+	exitCode, err := workloadExecCore(addr, name, command, tty)
 	if err != nil {
 		return err
+	}
+	os.Exit(exitCode)
+	return nil
+}
+
+// workloadExecCore does the actual exec stream work and returns the
+// remote exit code + any transport error. Caller is responsible for
+// propagating the exit code (via os.Exit) AFTER any cleanup it needs.
+func workloadExecCore(addr, name string, command []string, tty bool) (int, error) {
+	conn, err := dial(addr)
+	if err != nil {
+		return 0, err
 	}
 	defer conn.Close()
 	client := capsulev1.NewWorkloadServiceClient(conn)
@@ -770,7 +900,7 @@ func workloadExec(addr, name string, command []string, tty bool) error {
 
 	stream, err := client.Exec(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	// First message: config.
@@ -782,7 +912,7 @@ func workloadExec(addr, name string, command []string, tty bool) error {
 	if err := stream.Send(&capsulev1.WorkloadExecClientMessage{
 		Payload: &capsulev1.WorkloadExecClientMessage_Config{Config: cfg},
 	}); err != nil {
-		return err
+		return 0, err
 	}
 
 	// If we asked for a TTY and stdin is a terminal, put it in raw mode.
@@ -849,7 +979,7 @@ Loop:
 			break
 		}
 		if err != nil {
-			return err
+			return 0, err
 		}
 		switch p := msg.Payload.(type) {
 		case *capsulev1.WorkloadExecServerMessage_Stdout:
@@ -865,11 +995,7 @@ Loop:
 	if restore != nil {
 		restore()
 	}
-	// Hard-exit so the stdin goroutine (blocked on os.Stdin.Read in raw
-	// mode) doesn't delay process teardown. With exitCode=0 we still
-	// exit 0, matching "return nil" semantics.
-	os.Exit(exitCode)
-	return nil
+	return exitCode, nil
 }
 
 // --- volume -----------------------------------------------------------------

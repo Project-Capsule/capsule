@@ -35,6 +35,13 @@ enum DesiredState {
   DESIRED_STATE_UNSPECIFIED = 0; // treated as RUNNING
   DESIRED_STATE_RUNNING = 1;
   DESIRED_STATE_STOPPED = 2;
+  // Tombstone marker set by Service.Delete before driver.Remove. The
+  // reconciler skips workloads in this state (won't restart them, won't
+  // try to stop them — they're being torn down). On successful Remove,
+  // the row gets deleted; on failure, the row stays at DELETING so a
+  // retry of `workload delete` finishes the job without needing to
+  // re-set the marker.
+  DESIRED_STATE_DELETING = 3;
 }
 
 enum WorkloadKind {
@@ -75,6 +82,30 @@ message ContainerSpec {
   NetworkMode network_mode = 6;
   // Port mappings. Only meaningful when network_mode == BRIDGE.
   repeated PortMapping ports = 7;
+
+  // --- Debug / breakglass options ---------------------------------------
+  // These give a container effective host-root access. Use only for
+  // operator debugging via `capsulectl capsule debug` (or hand-rolled
+  // manifests for offline rescue). Capsule does not gate this — anyone
+  // who can reach :50000 can deploy a privileged container, so mTLS is
+  // a hard prereq before exposing a capsule on a hostile network.
+
+  // Run with all caps + raw access to /dev + relaxed seccomp/AppArmor.
+  // Equivalent to docker run --privileged.
+  bool privileged = 8;
+  // Share the host PID namespace — process list inside the container
+  // sees capsuled, containerd, runc, firecracker, etc.
+  bool host_pid = 9;
+  // Share the host mount namespace. Bind-mounts done inside the container
+  // become visible to the host (and vice versa). Use sparingly.
+  bool host_mount = 10;
+  // Share the host IPC namespace.
+  bool host_ipc = 11;
+  // Bind-mount these absolute paths from the host into the container at
+  // the same path. Read-write. Used by capsule debug to expose /perm,
+  // /sys, /dev, /run/capsule, /usr/sbin (so host's lvs/iptables/etc.
+  // work without being shipped in the debug image).
+  repeated string host_bind_paths = 12;
 }
 
 enum NetworkMode {
