@@ -71,8 +71,18 @@ type GetInfoResponse struct {
 	UptimeSeconds uint64 `protobuf:"varint,5,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
 	// Capsule version baked into the binary at build time.
 	CapsuleVersion string `protobuf:"bytes,6,opt,name=capsule_version,json=capsuleVersion,proto3" json:"capsule_version,omitempty"`
-	// Which A/B slot is currently active. Empty string until A/B updates ship.
-	ActiveSlot    string `protobuf:"bytes,7,opt,name=active_slot,json=activeSlot,proto3" json:"active_slot,omitempty"`
+	// Which A/B slot booted this capsule ("slot_a" / "slot_b"). Empty in dev
+	// mode (capsuled run off PID 1) or for old single-slot images.
+	ActiveSlot string `protobuf:"bytes,7,opt,name=active_slot,json=activeSlot,proto3" json:"active_slot,omitempty"`
+	// While an update is mid-commit, the slot we're trying. Empty otherwise.
+	// If active_slot == pending_slot, we're in tentative mode and waiting
+	// for UpdateConfirm before pending_deadline_unix.
+	PendingSlot string `protobuf:"bytes,8,opt,name=pending_slot,json=pendingSlot,proto3" json:"pending_slot,omitempty"`
+	// Unix timestamp (seconds) at which capsuled will auto-reboot to roll
+	// back if no UpdateConfirm arrives. Zero when no update is pending.
+	PendingDeadlineUnix int64 `protobuf:"varint,9,opt,name=pending_deadline_unix,json=pendingDeadlineUnix,proto3" json:"pending_deadline_unix,omitempty"`
+	// VERSION string from the most recently committed (or pending) bundle.
+	LastVersion   string `protobuf:"bytes,10,opt,name=last_version,json=lastVersion,proto3" json:"last_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -152,6 +162,27 @@ func (x *GetInfoResponse) GetCapsuleVersion() string {
 func (x *GetInfoResponse) GetActiveSlot() string {
 	if x != nil {
 		return x.ActiveSlot
+	}
+	return ""
+}
+
+func (x *GetInfoResponse) GetPendingSlot() string {
+	if x != nil {
+		return x.PendingSlot
+	}
+	return ""
+}
+
+func (x *GetInfoResponse) GetPendingDeadlineUnix() int64 {
+	if x != nil {
+		return x.PendingDeadlineUnix
+	}
+	return 0
+}
+
+func (x *GetInfoResponse) GetLastVersion() string {
+	if x != nil {
+		return x.LastVersion
 	}
 	return ""
 }
@@ -256,13 +287,302 @@ func (x *CapsuleLogChunk) GetData() []byte {
 	return nil
 }
 
+type UpdateOSRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Msg:
+	//
+	//	*UpdateOSRequest_Metadata
+	//	*UpdateOSRequest_Chunk
+	Msg           isUpdateOSRequest_Msg `protobuf_oneof:"msg"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateOSRequest) Reset() {
+	*x = UpdateOSRequest{}
+	mi := &file_capsule_v1_capsule_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateOSRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateOSRequest) ProtoMessage() {}
+
+func (x *UpdateOSRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_capsule_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateOSRequest.ProtoReflect.Descriptor instead.
+func (*UpdateOSRequest) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_capsule_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *UpdateOSRequest) GetMsg() isUpdateOSRequest_Msg {
+	if x != nil {
+		return x.Msg
+	}
+	return nil
+}
+
+func (x *UpdateOSRequest) GetMetadata() *UpdateOSMetadata {
+	if x != nil {
+		if x, ok := x.Msg.(*UpdateOSRequest_Metadata); ok {
+			return x.Metadata
+		}
+	}
+	return nil
+}
+
+func (x *UpdateOSRequest) GetChunk() []byte {
+	if x != nil {
+		if x, ok := x.Msg.(*UpdateOSRequest_Chunk); ok {
+			return x.Chunk
+		}
+	}
+	return nil
+}
+
+type isUpdateOSRequest_Msg interface {
+	isUpdateOSRequest_Msg()
+}
+
+type UpdateOSRequest_Metadata struct {
+	Metadata *UpdateOSMetadata `protobuf:"bytes,1,opt,name=metadata,proto3,oneof"` // first message only
+}
+
+type UpdateOSRequest_Chunk struct {
+	Chunk []byte `protobuf:"bytes,2,opt,name=chunk,proto3,oneof"` // subsequent streaming bytes (1 MiB recommended)
+}
+
+func (*UpdateOSRequest_Metadata) isUpdateOSRequest_Msg() {}
+
+func (*UpdateOSRequest_Chunk) isUpdateOSRequest_Msg() {}
+
+type UpdateOSMetadata struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Total bundle size in bytes.
+	TotalBytes uint64 `protobuf:"varint,1,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
+	// sha256 of the whole bundle, lowercase hex. Server verifies before apply.
+	Sha256Hex     string `protobuf:"bytes,2,opt,name=sha256_hex,json=sha256Hex,proto3" json:"sha256_hex,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateOSMetadata) Reset() {
+	*x = UpdateOSMetadata{}
+	mi := &file_capsule_v1_capsule_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateOSMetadata) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateOSMetadata) ProtoMessage() {}
+
+func (x *UpdateOSMetadata) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_capsule_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateOSMetadata.ProtoReflect.Descriptor instead.
+func (*UpdateOSMetadata) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_capsule_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *UpdateOSMetadata) GetTotalBytes() uint64 {
+	if x != nil {
+		return x.TotalBytes
+	}
+	return 0
+}
+
+func (x *UpdateOSMetadata) GetSha256Hex() string {
+	if x != nil {
+		return x.Sha256Hex
+	}
+	return ""
+}
+
+type UpdateOSResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Slot the bundle was written to ("slot_a" / "slot_b").
+	NextSlot string `protobuf:"bytes,1,opt,name=next_slot,json=nextSlot,proto3" json:"next_slot,omitempty"`
+	// VERSION string from the bundle.
+	NextVersion string `protobuf:"bytes,2,opt,name=next_version,json=nextVersion,proto3" json:"next_version,omitempty"`
+	// Always true on success today; reserved for future "stage but don't reboot" flows.
+	RebootScheduled bool `protobuf:"varint,3,opt,name=reboot_scheduled,json=rebootScheduled,proto3" json:"reboot_scheduled,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *UpdateOSResponse) Reset() {
+	*x = UpdateOSResponse{}
+	mi := &file_capsule_v1_capsule_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateOSResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateOSResponse) ProtoMessage() {}
+
+func (x *UpdateOSResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_capsule_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateOSResponse.ProtoReflect.Descriptor instead.
+func (*UpdateOSResponse) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_capsule_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *UpdateOSResponse) GetNextSlot() string {
+	if x != nil {
+		return x.NextSlot
+	}
+	return ""
+}
+
+func (x *UpdateOSResponse) GetNextVersion() string {
+	if x != nil {
+		return x.NextVersion
+	}
+	return ""
+}
+
+func (x *UpdateOSResponse) GetRebootScheduled() bool {
+	if x != nil {
+		return x.RebootScheduled
+	}
+	return false
+}
+
+type UpdateConfirmRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UpdateConfirmRequest) Reset() {
+	*x = UpdateConfirmRequest{}
+	mi := &file_capsule_v1_capsule_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateConfirmRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateConfirmRequest) ProtoMessage() {}
+
+func (x *UpdateConfirmRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_capsule_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateConfirmRequest.ProtoReflect.Descriptor instead.
+func (*UpdateConfirmRequest) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_capsule_proto_rawDescGZIP(), []int{7}
+}
+
+type UpdateConfirmResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Slot that was committed.
+	CommittedSlot string `protobuf:"bytes,1,opt,name=committed_slot,json=committedSlot,proto3" json:"committed_slot,omitempty"`
+	// VERSION committed.
+	CommittedVersion string `protobuf:"bytes,2,opt,name=committed_version,json=committedVersion,proto3" json:"committed_version,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *UpdateConfirmResponse) Reset() {
+	*x = UpdateConfirmResponse{}
+	mi := &file_capsule_v1_capsule_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UpdateConfirmResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UpdateConfirmResponse) ProtoMessage() {}
+
+func (x *UpdateConfirmResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_capsule_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UpdateConfirmResponse.ProtoReflect.Descriptor instead.
+func (*UpdateConfirmResponse) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_capsule_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *UpdateConfirmResponse) GetCommittedSlot() string {
+	if x != nil {
+		return x.CommittedSlot
+	}
+	return ""
+}
+
+func (x *UpdateConfirmResponse) GetCommittedVersion() string {
+	if x != nil {
+		return x.CommittedVersion
+	}
+	return ""
+}
+
 var File_capsule_v1_capsule_proto protoreflect.FileDescriptor
 
 const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\n" +
 	"\x18capsule/v1/capsule.proto\x12\n" +
 	"capsule.v1\"\x10\n" +
-	"\x0eGetInfoRequest\"\x90\x02\n" +
+	"\x0eGetInfoRequest\"\x8a\x03\n" +
 	"\x0fGetInfoResponse\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12%\n" +
 	"\x0ekernel_release\x18\x02 \x01(\tR\rkernelRelease\x12%\n" +
@@ -271,17 +591,40 @@ const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\x0euptime_seconds\x18\x05 \x01(\x04R\ruptimeSeconds\x12'\n" +
 	"\x0fcapsule_version\x18\x06 \x01(\tR\x0ecapsuleVersion\x12\x1f\n" +
 	"\vactive_slot\x18\a \x01(\tR\n" +
-	"activeSlot\"K\n" +
+	"activeSlot\x12!\n" +
+	"\fpending_slot\x18\b \x01(\tR\vpendingSlot\x122\n" +
+	"\x15pending_deadline_unix\x18\t \x01(\x03R\x13pendingDeadlineUnix\x12!\n" +
+	"\flast_version\x18\n" +
+	" \x01(\tR\vlastVersion\"K\n" +
 	"\x12CapsuleLogsRequest\x12\x16\n" +
 	"\x06follow\x18\x01 \x01(\bR\x06follow\x12\x1d\n" +
 	"\n" +
 	"tail_lines\x18\x02 \x01(\x05R\ttailLines\"%\n" +
 	"\x0fCapsuleLogChunk\x12\x12\n" +
-	"\x04data\x18\x01 \x01(\fR\x04data2\xa1\x01\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"l\n" +
+	"\x0fUpdateOSRequest\x12:\n" +
+	"\bmetadata\x18\x01 \x01(\v2\x1c.capsule.v1.UpdateOSMetadataH\x00R\bmetadata\x12\x16\n" +
+	"\x05chunk\x18\x02 \x01(\fH\x00R\x05chunkB\x05\n" +
+	"\x03msg\"R\n" +
+	"\x10UpdateOSMetadata\x12\x1f\n" +
+	"\vtotal_bytes\x18\x01 \x01(\x04R\n" +
+	"totalBytes\x12\x1d\n" +
+	"\n" +
+	"sha256_hex\x18\x02 \x01(\tR\tsha256Hex\"}\n" +
+	"\x10UpdateOSResponse\x12\x1b\n" +
+	"\tnext_slot\x18\x01 \x01(\tR\bnextSlot\x12!\n" +
+	"\fnext_version\x18\x02 \x01(\tR\vnextVersion\x12)\n" +
+	"\x10reboot_scheduled\x18\x03 \x01(\bR\x0frebootScheduled\"\x16\n" +
+	"\x14UpdateConfirmRequest\"k\n" +
+	"\x15UpdateConfirmResponse\x12%\n" +
+	"\x0ecommitted_slot\x18\x01 \x01(\tR\rcommittedSlot\x12+\n" +
+	"\x11committed_version\x18\x02 \x01(\tR\x10committedVersion2\xc0\x02\n" +
 	"\x0eCapsuleService\x12B\n" +
 	"\aGetInfo\x12\x1a.capsule.v1.GetInfoRequest\x1a\x1b.capsule.v1.GetInfoResponse\x12K\n" +
 	"\n" +
-	"StreamLogs\x12\x1e.capsule.v1.CapsuleLogsRequest\x1a\x1b.capsule.v1.CapsuleLogChunk0\x01B\xa5\x01\n" +
+	"StreamLogs\x12\x1e.capsule.v1.CapsuleLogsRequest\x1a\x1b.capsule.v1.CapsuleLogChunk0\x01\x12G\n" +
+	"\bUpdateOS\x12\x1b.capsule.v1.UpdateOSRequest\x1a\x1c.capsule.v1.UpdateOSResponse(\x01\x12T\n" +
+	"\rUpdateConfirm\x12 .capsule.v1.UpdateConfirmRequest\x1a!.capsule.v1.UpdateConfirmResponseB\xa5\x01\n" +
 	"\x0ecom.capsule.v1B\fCapsuleProtoP\x01Z<github.com/geekgonecrazy/capsule/models/capsule/v1;capsulev1\xa2\x02\x03CXX\xaa\x02\n" +
 	"Capsule.V1\xca\x02\n" +
 	"Capsule\\V1\xe2\x02\x16Capsule\\V1\\GPBMetadata\xea\x02\vCapsule::V1b\x06proto3"
@@ -298,23 +641,33 @@ func file_capsule_v1_capsule_proto_rawDescGZIP() []byte {
 	return file_capsule_v1_capsule_proto_rawDescData
 }
 
-var file_capsule_v1_capsule_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_capsule_v1_capsule_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_capsule_v1_capsule_proto_goTypes = []any{
-	(*GetInfoRequest)(nil),     // 0: capsule.v1.GetInfoRequest
-	(*GetInfoResponse)(nil),    // 1: capsule.v1.GetInfoResponse
-	(*CapsuleLogsRequest)(nil), // 2: capsule.v1.CapsuleLogsRequest
-	(*CapsuleLogChunk)(nil),    // 3: capsule.v1.CapsuleLogChunk
+	(*GetInfoRequest)(nil),        // 0: capsule.v1.GetInfoRequest
+	(*GetInfoResponse)(nil),       // 1: capsule.v1.GetInfoResponse
+	(*CapsuleLogsRequest)(nil),    // 2: capsule.v1.CapsuleLogsRequest
+	(*CapsuleLogChunk)(nil),       // 3: capsule.v1.CapsuleLogChunk
+	(*UpdateOSRequest)(nil),       // 4: capsule.v1.UpdateOSRequest
+	(*UpdateOSMetadata)(nil),      // 5: capsule.v1.UpdateOSMetadata
+	(*UpdateOSResponse)(nil),      // 6: capsule.v1.UpdateOSResponse
+	(*UpdateConfirmRequest)(nil),  // 7: capsule.v1.UpdateConfirmRequest
+	(*UpdateConfirmResponse)(nil), // 8: capsule.v1.UpdateConfirmResponse
 }
 var file_capsule_v1_capsule_proto_depIdxs = []int32{
-	0, // 0: capsule.v1.CapsuleService.GetInfo:input_type -> capsule.v1.GetInfoRequest
-	2, // 1: capsule.v1.CapsuleService.StreamLogs:input_type -> capsule.v1.CapsuleLogsRequest
-	1, // 2: capsule.v1.CapsuleService.GetInfo:output_type -> capsule.v1.GetInfoResponse
-	3, // 3: capsule.v1.CapsuleService.StreamLogs:output_type -> capsule.v1.CapsuleLogChunk
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	5, // 0: capsule.v1.UpdateOSRequest.metadata:type_name -> capsule.v1.UpdateOSMetadata
+	0, // 1: capsule.v1.CapsuleService.GetInfo:input_type -> capsule.v1.GetInfoRequest
+	2, // 2: capsule.v1.CapsuleService.StreamLogs:input_type -> capsule.v1.CapsuleLogsRequest
+	4, // 3: capsule.v1.CapsuleService.UpdateOS:input_type -> capsule.v1.UpdateOSRequest
+	7, // 4: capsule.v1.CapsuleService.UpdateConfirm:input_type -> capsule.v1.UpdateConfirmRequest
+	1, // 5: capsule.v1.CapsuleService.GetInfo:output_type -> capsule.v1.GetInfoResponse
+	3, // 6: capsule.v1.CapsuleService.StreamLogs:output_type -> capsule.v1.CapsuleLogChunk
+	6, // 7: capsule.v1.CapsuleService.UpdateOS:output_type -> capsule.v1.UpdateOSResponse
+	8, // 8: capsule.v1.CapsuleService.UpdateConfirm:output_type -> capsule.v1.UpdateConfirmResponse
+	5, // [5:9] is the sub-list for method output_type
+	1, // [1:5] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_capsule_v1_capsule_proto_init() }
@@ -322,13 +675,17 @@ func file_capsule_v1_capsule_proto_init() {
 	if File_capsule_v1_capsule_proto != nil {
 		return
 	}
+	file_capsule_v1_capsule_proto_msgTypes[4].OneofWrappers = []any{
+		(*UpdateOSRequest_Metadata)(nil),
+		(*UpdateOSRequest_Chunk)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_capsule_v1_capsule_proto_rawDesc), len(file_capsule_v1_capsule_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

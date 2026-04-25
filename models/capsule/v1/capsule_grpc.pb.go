@@ -19,8 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	CapsuleService_GetInfo_FullMethodName    = "/capsule.v1.CapsuleService/GetInfo"
-	CapsuleService_StreamLogs_FullMethodName = "/capsule.v1.CapsuleService/StreamLogs"
+	CapsuleService_GetInfo_FullMethodName       = "/capsule.v1.CapsuleService/GetInfo"
+	CapsuleService_StreamLogs_FullMethodName    = "/capsule.v1.CapsuleService/StreamLogs"
+	CapsuleService_UpdateOS_FullMethodName      = "/capsule.v1.CapsuleService/UpdateOS"
+	CapsuleService_UpdateConfirm_FullMethodName = "/capsule.v1.CapsuleService/UpdateConfirm"
 )
 
 // CapsuleServiceClient is the client API for CapsuleService service.
@@ -36,6 +38,19 @@ type CapsuleServiceClient interface {
 	// This is the host-side log — boot, reconciler ticks, runtime driver
 	// events. Separate from workload logs, which go via WorkloadService.Logs.
 	StreamLogs(ctx context.Context, in *CapsuleLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[CapsuleLogChunk], error)
+	// UpdateOS streams a new OS update bundle from the operator to the
+	// capsule. The first message is metadata (size + sha256); subsequent
+	// messages carry chunked bytes. Capsuled writes the new rootfs to the
+	// inactive A/B slot, copies the kernel + initramfs into /boot, sets a
+	// syslinux one-shot for the next boot, persists pending state, and
+	// schedules a reboot. The capsule comes back in TENTATIVE mode and
+	// waits for UpdateConfirm — if that doesn't arrive before the deadline,
+	// it auto-reboots and the bootloader's DEFAULT picks the prior slot.
+	UpdateOS(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UpdateOSRequest, UpdateOSResponse], error)
+	// UpdateConfirm commits a tentative slot. Operator runs this after
+	// they've verified the new slot is healthy. Rewrites the syslinux DEFAULT
+	// and clears pending state.
+	UpdateConfirm(ctx context.Context, in *UpdateConfirmRequest, opts ...grpc.CallOption) (*UpdateConfirmResponse, error)
 }
 
 type capsuleServiceClient struct {
@@ -75,6 +90,29 @@ func (c *capsuleServiceClient) StreamLogs(ctx context.Context, in *CapsuleLogsRe
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type CapsuleService_StreamLogsClient = grpc.ServerStreamingClient[CapsuleLogChunk]
 
+func (c *capsuleServiceClient) UpdateOS(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UpdateOSRequest, UpdateOSResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &CapsuleService_ServiceDesc.Streams[1], CapsuleService_UpdateOS_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[UpdateOSRequest, UpdateOSResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CapsuleService_UpdateOSClient = grpc.ClientStreamingClient[UpdateOSRequest, UpdateOSResponse]
+
+func (c *capsuleServiceClient) UpdateConfirm(ctx context.Context, in *UpdateConfirmRequest, opts ...grpc.CallOption) (*UpdateConfirmResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateConfirmResponse)
+	err := c.cc.Invoke(ctx, CapsuleService_UpdateConfirm_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CapsuleServiceServer is the server API for CapsuleService service.
 // All implementations must embed UnimplementedCapsuleServiceServer
 // for forward compatibility.
@@ -88,6 +126,19 @@ type CapsuleServiceServer interface {
 	// This is the host-side log — boot, reconciler ticks, runtime driver
 	// events. Separate from workload logs, which go via WorkloadService.Logs.
 	StreamLogs(*CapsuleLogsRequest, grpc.ServerStreamingServer[CapsuleLogChunk]) error
+	// UpdateOS streams a new OS update bundle from the operator to the
+	// capsule. The first message is metadata (size + sha256); subsequent
+	// messages carry chunked bytes. Capsuled writes the new rootfs to the
+	// inactive A/B slot, copies the kernel + initramfs into /boot, sets a
+	// syslinux one-shot for the next boot, persists pending state, and
+	// schedules a reboot. The capsule comes back in TENTATIVE mode and
+	// waits for UpdateConfirm — if that doesn't arrive before the deadline,
+	// it auto-reboots and the bootloader's DEFAULT picks the prior slot.
+	UpdateOS(grpc.ClientStreamingServer[UpdateOSRequest, UpdateOSResponse]) error
+	// UpdateConfirm commits a tentative slot. Operator runs this after
+	// they've verified the new slot is healthy. Rewrites the syslinux DEFAULT
+	// and clears pending state.
+	UpdateConfirm(context.Context, *UpdateConfirmRequest) (*UpdateConfirmResponse, error)
 	mustEmbedUnimplementedCapsuleServiceServer()
 }
 
@@ -103,6 +154,12 @@ func (UnimplementedCapsuleServiceServer) GetInfo(context.Context, *GetInfoReques
 }
 func (UnimplementedCapsuleServiceServer) StreamLogs(*CapsuleLogsRequest, grpc.ServerStreamingServer[CapsuleLogChunk]) error {
 	return status.Error(codes.Unimplemented, "method StreamLogs not implemented")
+}
+func (UnimplementedCapsuleServiceServer) UpdateOS(grpc.ClientStreamingServer[UpdateOSRequest, UpdateOSResponse]) error {
+	return status.Error(codes.Unimplemented, "method UpdateOS not implemented")
+}
+func (UnimplementedCapsuleServiceServer) UpdateConfirm(context.Context, *UpdateConfirmRequest) (*UpdateConfirmResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateConfirm not implemented")
 }
 func (UnimplementedCapsuleServiceServer) mustEmbedUnimplementedCapsuleServiceServer() {}
 func (UnimplementedCapsuleServiceServer) testEmbeddedByValue()                        {}
@@ -154,6 +211,31 @@ func _CapsuleService_StreamLogs_Handler(srv interface{}, stream grpc.ServerStrea
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type CapsuleService_StreamLogsServer = grpc.ServerStreamingServer[CapsuleLogChunk]
 
+func _CapsuleService_UpdateOS_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(CapsuleServiceServer).UpdateOS(&grpc.GenericServerStream[UpdateOSRequest, UpdateOSResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type CapsuleService_UpdateOSServer = grpc.ClientStreamingServer[UpdateOSRequest, UpdateOSResponse]
+
+func _CapsuleService_UpdateConfirm_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateConfirmRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CapsuleServiceServer).UpdateConfirm(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CapsuleService_UpdateConfirm_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CapsuleServiceServer).UpdateConfirm(ctx, req.(*UpdateConfirmRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CapsuleService_ServiceDesc is the grpc.ServiceDesc for CapsuleService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -165,12 +247,21 @@ var CapsuleService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetInfo",
 			Handler:    _CapsuleService_GetInfo_Handler,
 		},
+		{
+			MethodName: "UpdateConfirm",
+			Handler:    _CapsuleService_UpdateConfirm_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "StreamLogs",
 			Handler:       _CapsuleService_StreamLogs_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "UpdateOS",
+			Handler:       _CapsuleService_UpdateOS_Handler,
+			ClientStreams: true,
 		},
 	},
 	Metadata: "capsule/v1/capsule.proto",

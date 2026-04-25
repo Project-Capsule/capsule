@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +50,12 @@ func initPlatform(ctx context.Context) (Result, error) {
 			}
 			slog.Warn("optional mount failed", "target", m.target, "err", err)
 		}
+	}
+
+	// /proc is mounted now → safe to read /proc/cmdline for the slot marker.
+	res.ActiveSlot = detectActiveSlot()
+	if res.ActiveSlot != "" {
+		slog.Info("active slot", "slot", res.ActiveSlot)
 	}
 
 	// Docker strips /etc/hostname during image build, so we keep our copy
@@ -129,15 +136,19 @@ func enableIPForward() error {
 //
 // Layout on disk (built by image/pack.sh, initialized on first boot):
 //
-//	VG "capsule" on /dev/vda3
+//	VG "capsule" on partition 4 of the boot disk (MBR type 0x8e)
 //	  ├─ LV "meta"      (plain LV, ext4)          → mounted here
 //	  └─ LV "thinpool"  (dm-thin pool)            → volumes + snapshots
+//
+// The boot disk varies by host (`/dev/vda` in QEMU, `/dev/nvme0n1` on the
+// Beelink, `/dev/sdX` on USB). We resolve PERM dynamically by parsing the
+// kernel cmdline for `root=PARTUUID=<sig>-<NN>` to get the disk signature,
+// then scanning /sys/class/block for the matching disk's partition 4.
 func mountPerm() error {
 	const (
-		target  = "/perm"
-		vg      = "capsule"
-		metaLV  = "meta"
-		permDev = "/dev/vda3"
+		target = "/perm"
+		vg     = "capsule"
+		metaLV = "meta"
 	)
 
 	if _, err := os.Stat(target); err != nil {
@@ -149,8 +160,9 @@ func mountPerm() error {
 		return ensurePermDirs(target)
 	}
 
-	if _, err := os.Stat(permDev); err != nil {
-		return fmt.Errorf("PERM device %s missing: %w", permDev, err)
+	permDev, err := findPermPartition()
+	if err != nil {
+		return fmt.Errorf("locate PERM partition: %w", err)
 	}
 
 	if !pvExists(permDev) {
@@ -182,6 +194,143 @@ func mountPerm() error {
 // `pvs <dev>` exits 0 when there's a PV, non-zero otherwise.
 func pvExists(dev string) bool {
 	return exec.Command("/sbin/pvs", "--noheadings", dev).Run() == nil
+}
+
+// findPermPartition locates the PERM (partition 4) block device. Wrapper
+// around FindPartitionByNumber kept for the existing call site.
+func findPermPartition() (string, error) {
+	return FindPartitionByNumber(4)
+}
+
+// FindPartitionByNumber returns the absolute /dev path of partition N on
+// the boot disk. The boot disk is identified by the MBR signature embedded
+// in `root=PARTUUID=<sig>-<NN>` on the kernel cmdline; we scan
+// /sys/class/block for partitions whose parent disk has that signature
+// and return the one with the matching `partition` number.
+//
+// Works for any device naming (vda / nvme0n1 / sda / mmcblk0) — no
+// hardcoded paths.
+//
+// Used by:
+//   - mountPerm (partition 4 = LVM PV)
+//   - core/update for the inactive slot's block device (2 or 3)
+//   - core/update for KEELBOOT (1)
+func FindPartitionByNumber(partNum int) (string, error) {
+	wantSig, err := bootDiskSignature()
+	if err != nil {
+		return "", err
+	}
+	want := strconv.Itoa(partNum)
+
+	entries, err := os.ReadDir("/sys/class/block")
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		partNumBytes, err := os.ReadFile("/sys/class/block/" + e.Name() + "/partition")
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(partNumBytes)) != want {
+			continue
+		}
+		target, err := filepath.EvalSymlinks("/sys/class/block/" + e.Name())
+		if err != nil {
+			continue
+		}
+		diskName := filepath.Base(filepath.Dir(target))
+		gotSig, err := readMBRDiskSig("/dev/" + diskName)
+		if err != nil {
+			continue
+		}
+		if gotSig == wantSig {
+			return "/dev/" + e.Name(), nil
+		}
+	}
+	return "", fmt.Errorf("no partition %d found with disk signature %s", partNum, wantSig)
+}
+
+// BootDisk returns the absolute /dev path of the disk we booted from
+// (e.g. "/dev/vda", "/dev/nvme0n1"). Resolved from the active slot's
+// PARTUUID on the kernel cmdline.
+func BootDisk() (string, error) {
+	wantSig, err := bootDiskSignature()
+	if err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir("/sys/class/block")
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		// Whole disks don't have a `partition` file; partitions do.
+		if _, err := os.Stat("/sys/class/block/" + e.Name() + "/partition"); err == nil {
+			continue
+		}
+		gotSig, err := readMBRDiskSig("/dev/" + e.Name())
+		if err != nil {
+			continue
+		}
+		if gotSig == wantSig {
+			return "/dev/" + e.Name(), nil
+		}
+	}
+	return "", fmt.Errorf("no whole disk found with signature %s", wantSig)
+}
+
+// bootDiskSignature parses /proc/cmdline for `root=PARTUUID=<sig>-<NN>`
+// and returns the lowercase 8-char hex signature. Shared helper for
+// FindPartitionByNumber and BootDisk.
+func bootDiskSignature() (string, error) {
+	cmdline, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		return "", fmt.Errorf("read /proc/cmdline: %w", err)
+	}
+	for _, f := range strings.Fields(string(cmdline)) {
+		if pu, ok := strings.CutPrefix(f, "root=PARTUUID="); ok {
+			parts := strings.SplitN(pu, "-", 2)
+			if len(parts) != 2 {
+				return "", fmt.Errorf("malformed PARTUUID %q", pu)
+			}
+			return strings.ToLower(parts[0]), nil
+		}
+	}
+	return "", fmt.Errorf("no root=PARTUUID in /proc/cmdline (cmdline: %q)", strings.TrimSpace(string(cmdline)))
+}
+
+// readMBRDiskSig reads the 4-byte MBR disk signature at offset 0x1B8 and
+// formats it the way Linux exposes PARTUUID prefixes (big-endian hex).
+// On-disk byte order is little-endian, which is why we reverse.
+func readMBRDiskSig(devPath string) (string, error) {
+	f, err := os.Open(devPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	var sig [4]byte
+	if _, err := f.ReadAt(sig[:], 0x1B8); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%02x%02x%02x%02x", sig[3], sig[2], sig[1], sig[0]), nil
+}
+
+// detectActiveSlot parses /proc/cmdline for `capsule.slot=a|b` and returns
+// "slot_a" / "slot_b". Empty string if no marker (dev mode, or pre-A/B
+// build). The marker is set per-syslinux-LABEL by pack.sh.
+func detectActiveSlot() string {
+	data, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		return ""
+	}
+	for f := range strings.FieldsSeq(string(data)) {
+		switch f {
+		case "capsule.slot=a":
+			return "slot_a"
+		case "capsule.slot=b":
+			return "slot_b"
+		}
+	}
+	return ""
 }
 
 // initializeCapsuleVG runs the first-boot sequence that turns a blank

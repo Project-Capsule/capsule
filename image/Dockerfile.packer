@@ -19,22 +19,30 @@ RUN apk add --no-cache \
       xz \
       xxd
 
-# Fetch the Alpine linux-virt kernel + module tree and build a custom
-# initramfs. The stock `initramfs-virt` shipped with linux-virt lacks
-# squashfs.ko + overlay.ko and its init script doesn't do the
-# squashfs-rootfs-with-tmpfs-overlay pattern we need for immutable boot.
-# So we build our own: busybox-static + the virtio / squashfs / overlay
-# kernel modules + a ~100-line /init script copied from image/initramfs-init.
+# Fetch the Alpine linux-lts kernel + module tree and build a custom
+# initramfs. linux-lts is the general-purpose Alpine kernel with all the
+# hardware drivers (NVMe, Intel/Realtek NICs, USB, etc.) needed for real
+# hardware (Beelink mini-PC, etc.) AND keeps KVM + virtio support so the
+# same kernel boots fine under QEMU. We previously used linux-virt, which
+# only works inside VMs.
 #
-# linux-virt is intentionally unpinned for now — a future commit will pin
-# the exact kernel version once A/B updates land and determinism matters.
+# The stock `initramfs-lts` from this package doesn't include squashfs.ko
+# + overlay.ko and its init script doesn't do the squashfs-with-tmpfs-
+# overlay pattern we need for an immutable rootfs. So we build our own:
+# busybox-static + the virtio / squashfs / overlay kernel modules + a
+# ~100-line /init script copied from image/initramfs-init.
+#
+# linux-lts is pinned to a known version so update bundles are
+# deterministic. To bump: change the version, rebuild, smoke-test on the
+# VPS via `capsulectl capsule update push build/update.tar`.
+ARG LINUX_LTS_VERSION=6.6.134-r0
 RUN apk --no-cache --initdb --root /tmp/kroot \
       --keys-dir /etc/apk/keys \
       --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/main \
       --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
-      add alpine-base linux-virt busybox-static \
+      add alpine-base "linux-lts=${LINUX_LTS_VERSION}" busybox-static \
  && mkdir -p /bootfiles \
- && cp /tmp/kroot/boot/vmlinuz-virt /bootfiles/vmlinuz
+ && cp /tmp/kroot/boot/vmlinuz-lts /bootfiles/vmlinuz
 
 COPY image/initramfs-init /initramfs-init
 
@@ -54,7 +62,7 @@ RUN set -eux \
  && cp /tmp/kroot/bin/busybox.static "$ROOT"/bin/busybox \
  && for applet in sh mount umount insmod switch_root cat grep cut head tail \
                   mkdir mknod chmod chroot echo sleep tr sed od dd printf \
-                  basename readlink find ls ln rm wc awk env test; do \
+                  basename dirname readlink find ls ln rm wc awk env test; do \
       ln -sf busybox "$ROOT/bin/$applet"; \
     done \
  && ln -sf ../bin/busybox "$ROOT/sbin/switch_root" \

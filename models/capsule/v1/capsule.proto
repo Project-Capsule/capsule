@@ -11,6 +11,21 @@ service CapsuleService {
   // This is the host-side log — boot, reconciler ticks, runtime driver
   // events. Separate from workload logs, which go via WorkloadService.Logs.
   rpc StreamLogs(CapsuleLogsRequest) returns (stream CapsuleLogChunk);
+
+  // UpdateOS streams a new OS update bundle from the operator to the
+  // capsule. The first message is metadata (size + sha256); subsequent
+  // messages carry chunked bytes. Capsuled writes the new rootfs to the
+  // inactive A/B slot, copies the kernel + initramfs into /boot, sets a
+  // syslinux one-shot for the next boot, persists pending state, and
+  // schedules a reboot. The capsule comes back in TENTATIVE mode and
+  // waits for UpdateConfirm — if that doesn't arrive before the deadline,
+  // it auto-reboots and the bootloader's DEFAULT picks the prior slot.
+  rpc UpdateOS(stream UpdateOSRequest) returns (UpdateOSResponse);
+
+  // UpdateConfirm commits a tentative slot. Operator runs this after
+  // they've verified the new slot is healthy. Rewrites the syslinux DEFAULT
+  // and clears pending state.
+  rpc UpdateConfirm(UpdateConfirmRequest) returns (UpdateConfirmResponse);
 }
 
 message GetInfoRequest {}
@@ -28,8 +43,18 @@ message GetInfoResponse {
   uint64 uptime_seconds = 5;
   // Capsule version baked into the binary at build time.
   string capsule_version = 6;
-  // Which A/B slot is currently active. Empty string until A/B updates ship.
+  // Which A/B slot booted this capsule ("slot_a" / "slot_b"). Empty in dev
+  // mode (capsuled run off PID 1) or for old single-slot images.
   string active_slot = 7;
+  // While an update is mid-commit, the slot we're trying. Empty otherwise.
+  // If active_slot == pending_slot, we're in tentative mode and waiting
+  // for UpdateConfirm before pending_deadline_unix.
+  string pending_slot = 8;
+  // Unix timestamp (seconds) at which capsuled will auto-reboot to roll
+  // back if no UpdateConfirm arrives. Zero when no update is pending.
+  int64 pending_deadline_unix = 9;
+  // VERSION string from the most recently committed (or pending) bundle.
+  string last_version = 10;
 }
 
 message CapsuleLogsRequest {
@@ -43,4 +68,36 @@ message CapsuleLogsRequest {
 message CapsuleLogChunk {
   // Raw log bytes. Line framing is preserved but not guaranteed.
   bytes data = 1;
+}
+
+message UpdateOSRequest {
+  oneof msg {
+    UpdateOSMetadata metadata = 1; // first message only
+    bytes chunk = 2;               // subsequent streaming bytes (1 MiB recommended)
+  }
+}
+
+message UpdateOSMetadata {
+  // Total bundle size in bytes.
+  uint64 total_bytes = 1;
+  // sha256 of the whole bundle, lowercase hex. Server verifies before apply.
+  string sha256_hex = 2;
+}
+
+message UpdateOSResponse {
+  // Slot the bundle was written to ("slot_a" / "slot_b").
+  string next_slot = 1;
+  // VERSION string from the bundle.
+  string next_version = 2;
+  // Always true on success today; reserved for future "stage but don't reboot" flows.
+  bool reboot_scheduled = 3;
+}
+
+message UpdateConfirmRequest {}
+
+message UpdateConfirmResponse {
+  // Slot that was committed.
+  string committed_slot = 1;
+  // VERSION committed.
+  string committed_version = 2;
 }

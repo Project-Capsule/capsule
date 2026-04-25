@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -42,6 +44,13 @@ func main() {
 	switch group + " " + cmd {
 	case "capsule info":
 		err = capsuleInfo(*addr)
+	case "capsule update":
+		// "capsule update push <bundle> [--auto-confirm=N]" / "capsule update confirm"
+		if len(subArgs) < 1 {
+			err = errors.New("capsule update requires a subcommand: push | confirm")
+			break
+		}
+		err = capsuleUpdate(*addr, subArgs[0], subArgs[1:])
 	case "capsule logs":
 		fs := flag.NewFlagSet("capsule logs", flag.ExitOnError)
 		follow := fs.Bool("f", false, "stream new output until Ctrl-C")
@@ -193,6 +202,8 @@ func usage() {
 Usage:
   capsulectl [--capsule host:port] capsule info
   capsulectl [--capsule host:port] capsule logs [-f] [-n N]
+  capsulectl [--capsule host:port] capsule update push <bundle.tar> [--auto-confirm=N]
+  capsulectl [--capsule host:port] capsule update confirm
   capsulectl [--capsule host:port] workload apply -f <manifest.yaml>
   capsulectl [--capsule host:port] workload list
   capsulectl [--capsule host:port] workload get <name>
@@ -284,8 +295,194 @@ func capsuleInfo(addr string) error {
 		fmt.Printf("  uptime_seconds:  %d\n", resp.UptimeSeconds)
 		fmt.Printf("  capsule_version: %s\n", resp.CapsuleVersion)
 		fmt.Printf("  active_slot:     %s\n", resp.ActiveSlot)
+		if resp.LastVersion != "" {
+			fmt.Printf("  last_version:    %s\n", resp.LastVersion)
+		}
+		if resp.PendingSlot != "" {
+			until := time.Until(time.Unix(resp.PendingDeadlineUnix, 0)).Round(time.Second)
+			marker := "auto-rollback in " + until.String()
+			if until <= 0 {
+				marker = "deadline passed"
+			}
+			fmt.Printf("  pending_slot:    %s (%s — run `capsule update confirm` to commit)\n", resp.PendingSlot, marker)
+		}
 		return nil
 	})
+}
+
+// --- capsule update --------------------------------------------------------
+
+func capsuleUpdate(addr, sub string, args []string) error {
+	switch sub {
+	case "push":
+		// "capsule update push <bundle> [--auto-confirm=N]"
+		normalized := frontLoadFlags(joinValueFlags(args, map[string]bool{"auto-confirm": true}))
+		fs := flag.NewFlagSet("capsule update push", flag.ExitOnError)
+		autoConfirm := fs.Int("auto-confirm", 0, "after push + reboot, wait N seconds, verify health, then auto-send confirm")
+		_ = fs.Parse(normalized)
+		if fs.NArg() < 1 {
+			return errors.New("capsule update push requires a bundle path")
+		}
+		return capsuleUpdatePush(addr, fs.Arg(0), *autoConfirm)
+	case "confirm":
+		return capsuleUpdateConfirm(addr)
+	default:
+		return fmt.Errorf("unknown capsule update subcommand: %s", sub)
+	}
+}
+
+func capsuleUpdatePush(addr, bundlePath string, autoConfirmSecs int) error {
+	st, err := os.Stat(bundlePath)
+	if err != nil {
+		return fmt.Errorf("stat bundle: %w", err)
+	}
+	totalBytes := uint64(st.Size())
+	sum, err := sha256File(bundlePath)
+	if err != nil {
+		return fmt.Errorf("sha256: %w", err)
+	}
+
+	conn, err := dial(addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := capsulev1.NewCapsuleServiceClient(conn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	stream, err := client.UpdateOS(ctx)
+	if err != nil {
+		return fmt.Errorf("UpdateOS: %w", err)
+	}
+	if err := stream.Send(&capsulev1.UpdateOSRequest{
+		Msg: &capsulev1.UpdateOSRequest_Metadata{
+			Metadata: &capsulev1.UpdateOSMetadata{
+				TotalBytes: totalBytes,
+				Sha256Hex:  sum,
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("send metadata: %w", err)
+	}
+
+	f, err := os.Open(bundlePath)
+	if err != nil {
+		return fmt.Errorf("open bundle: %w", err)
+	}
+	defer f.Close()
+	buf := make([]byte, 1024*1024) // 1 MiB chunks
+	var sent uint64
+	lastTick := time.Now()
+	for {
+		n, rerr := f.Read(buf)
+		if n > 0 {
+			if err := stream.Send(&capsulev1.UpdateOSRequest{
+				Msg: &capsulev1.UpdateOSRequest_Chunk{Chunk: append([]byte(nil), buf[:n]...)},
+			}); err != nil {
+				return fmt.Errorf("send chunk: %w", err)
+			}
+			sent += uint64(n)
+			if time.Since(lastTick) > 500*time.Millisecond {
+				fmt.Fprintf(os.Stderr, "\r  pushing... %d / %d MiB",
+					sent/(1024*1024), totalBytes/(1024*1024))
+				lastTick = time.Now()
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return fmt.Errorf("read bundle: %w", rerr)
+		}
+	}
+	fmt.Fprintln(os.Stderr)
+
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		return fmt.Errorf("CloseAndRecv: %w", err)
+	}
+	fmt.Printf("update pushed: slot=%s version=%s\n", resp.NextSlot, resp.NextVersion)
+	fmt.Printf("capsule will reboot now. wait for it to come back, then verify health.\n")
+
+	if autoConfirmSecs <= 0 {
+		fmt.Printf("when ready, run: capsulectl --capsule %s capsule update confirm\n", addr)
+		return nil
+	}
+	return capsuleUpdateAutoConfirm(addr, resp.NextSlot, autoConfirmSecs)
+}
+
+func capsuleUpdateAutoConfirm(addr, expectSlot string, settleSecs int) error {
+	fmt.Printf("auto-confirm: waiting for capsule to come back as %s, then settle for %ds\n", expectSlot, settleSecs)
+	deadline := time.Now().Add(15 * time.Minute)
+	// Phase 1: wait for capsule to become reachable on the expected slot.
+	for time.Now().Before(deadline) {
+		conn, err := dial(addr)
+		if err == nil {
+			client := capsulev1.NewCapsuleServiceClient(conn)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			resp, err := client.GetInfo(ctx, &capsulev1.GetInfoRequest{})
+			cancel()
+			conn.Close()
+			if err == nil && resp.ActiveSlot == expectSlot {
+				break
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	// Phase 2: settle window — re-poll periodically; bail if it goes unhealthy.
+	settleEnd := time.Now().Add(time.Duration(settleSecs) * time.Second)
+	for time.Now().Before(settleEnd) {
+		time.Sleep(5 * time.Second)
+		conn, err := dial(addr)
+		if err != nil {
+			return fmt.Errorf("auto-confirm: dial during settle: %w", err)
+		}
+		client := capsulev1.NewCapsuleServiceClient(conn)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		resp, err := client.GetInfo(ctx, &capsulev1.GetInfoRequest{})
+		cancel()
+		conn.Close()
+		if err != nil {
+			return fmt.Errorf("auto-confirm: GetInfo during settle: %w", err)
+		}
+		if resp.ActiveSlot != expectSlot {
+			return fmt.Errorf("auto-confirm: active_slot drifted from %s to %s", expectSlot, resp.ActiveSlot)
+		}
+	}
+	// Phase 3: send the confirm.
+	return capsuleUpdateConfirm(addr)
+}
+
+func capsuleUpdateConfirm(addr string) error {
+	conn, err := dial(addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := capsulev1.NewCapsuleServiceClient(conn)
+	return withCtx(func(ctx context.Context) error {
+		resp, err := client.UpdateConfirm(ctx, &capsulev1.UpdateConfirmRequest{})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("update committed: slot=%s version=%s\n", resp.CommittedSlot, resp.CommittedVersion)
+		return nil
+	})
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // --- workload apply --------------------------------------------------------

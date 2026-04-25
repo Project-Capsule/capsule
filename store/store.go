@@ -28,8 +28,42 @@ type Store interface {
 	Workloads() WorkloadStore
 	// Volumes returns the VolumeStore used for Volume persistence.
 	Volumes() VolumeStore
+	// OSState returns the OSStateStore used for A/B-update bookkeeping.
+	OSState() OSStateStore
 	// Close releases any underlying resources (database handles etc).
 	Close() error
+}
+
+// OSState is the singleton record describing the capsule's A/B update
+// state. There is only ever one instance per capsule.
+type OSState struct {
+	// ActiveSlot is the slot we booted into ("slot_a" / "slot_b").
+	ActiveSlot string
+	// PendingSlot is set between an UpdateOS push and the matching
+	// UpdateConfirm (or auto-rollback). Empty when no update is pending.
+	PendingSlot string
+	// PendingDeadlineUnix is the wall-clock time at which capsuled will
+	// auto-reboot to roll back if no UpdateConfirm arrives. Zero when no
+	// update is pending.
+	PendingDeadlineUnix int64
+	// LastGoodSlot is the slot that was most recently successfully committed.
+	// Seeded on first boot to ActiveSlot.
+	LastGoodSlot string
+	// LastVersion is the VERSION string of the most recently committed (or
+	// pending) bundle. Empty if the slot was never updated via UpdateOS.
+	LastVersion string
+	// UpdatedAtUnix is when the row was last modified — diagnostics only.
+	UpdatedAtUnix int64
+}
+
+// OSStateStore persists the single OSState record. The store is keyed by
+// nothing — there's only ever one row per capsule.
+type OSStateStore interface {
+	// Get returns the persisted OSState. Returns ErrNotFound on a fresh
+	// capsule (the caller seeds the first record).
+	Get(ctx context.Context) (*OSState, error)
+	// Put inserts or replaces the singleton row.
+	Put(ctx context.Context, state *OSState) error
 }
 
 // VolumeStore persists Volume records. Unlike workloads, volumes are

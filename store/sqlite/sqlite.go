@@ -19,6 +19,7 @@ type Store struct {
 	db        *sql.DB
 	workloads *workloadStore
 	volumes   *volumeStore
+	osState   *osStateStore
 }
 
 // Open opens (and creates if necessary) the SQLite database at path, runs
@@ -35,6 +36,7 @@ func Open(path string) (*Store, error) {
 	s := &Store{db: db}
 	s.workloads = &workloadStore{db: db}
 	s.volumes = &volumeStore{db: db}
+	s.osState = &osStateStore{db: db}
 	return s, nil
 }
 
@@ -43,6 +45,9 @@ func (s *Store) Workloads() store.WorkloadStore { return s.workloads }
 
 // Volumes returns the VolumeStore. See store.Store.
 func (s *Store) Volumes() store.VolumeStore { return s.volumes }
+
+// OSState returns the OSStateStore. See store.Store.
+func (s *Store) OSState() store.OSStateStore { return s.osState }
 
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
@@ -59,6 +64,17 @@ func migrate(db *sql.DB) error {
 			host_path TEXT NOT NULL,
 			created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 		);`,
+		// Singleton row of A/B update bookkeeping. CHECK enforces at most
+		// one row; capsuled inserts the seed record on first boot.
+		`CREATE TABLE IF NOT EXISTS os_state (
+			singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
+			active_slot           TEXT NOT NULL,
+			pending_slot          TEXT,
+			pending_deadline_unix INTEGER,
+			last_good_slot        TEXT NOT NULL,
+			last_version          TEXT,
+			updated_at_unix       INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+		);`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -66,6 +82,64 @@ func migrate(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+type osStateStore struct{ db *sql.DB }
+
+func (s *osStateStore) Get(ctx context.Context) (*store.OSState, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT active_slot, pending_slot, pending_deadline_unix,
+       last_good_slot, last_version, updated_at_unix
+FROM os_state WHERE singleton = 1;`)
+	var (
+		st       store.OSState
+		pending  sql.NullString
+		deadline sql.NullInt64
+		ver      sql.NullString
+	)
+	if err := row.Scan(&st.ActiveSlot, &pending, &deadline, &st.LastGoodSlot, &ver, &st.UpdatedAtUnix); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	if pending.Valid {
+		st.PendingSlot = pending.String
+	}
+	if deadline.Valid {
+		st.PendingDeadlineUnix = deadline.Int64
+	}
+	if ver.Valid {
+		st.LastVersion = ver.String
+	}
+	return &st, nil
+}
+
+func (s *osStateStore) Put(ctx context.Context, st *store.OSState) error {
+	var pending, ver any
+	var deadline any
+	if st.PendingSlot != "" {
+		pending = st.PendingSlot
+	}
+	if st.PendingDeadlineUnix != 0 {
+		deadline = st.PendingDeadlineUnix
+	}
+	if st.LastVersion != "" {
+		ver = st.LastVersion
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO os_state(singleton, active_slot, pending_slot, pending_deadline_unix,
+                    last_good_slot, last_version, updated_at_unix)
+VALUES(1, ?, ?, ?, ?, ?, strftime('%s','now'))
+ON CONFLICT(singleton) DO UPDATE SET
+    active_slot           = excluded.active_slot,
+    pending_slot          = excluded.pending_slot,
+    pending_deadline_unix = excluded.pending_deadline_unix,
+    last_good_slot        = excluded.last_good_slot,
+    last_version          = excluded.last_version,
+    updated_at_unix       = excluded.updated_at_unix;
+`, st.ActiveSlot, pending, deadline, st.LastGoodSlot, ver)
+	return err
 }
 
 type volumeStore struct{ db *sql.DB }

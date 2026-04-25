@@ -15,6 +15,7 @@ import (
 type memStore struct {
 	workloads *workloadStore
 	volumes   *volumeStore
+	osState   *osStateStore
 }
 
 // New returns a fresh in-memory Store.
@@ -22,12 +23,37 @@ func New() store.Store {
 	return &memStore{
 		workloads: &workloadStore{items: map[string]*capsulev1.Workload{}},
 		volumes:   &volumeStore{items: map[string]*capsulev1.Volume{}},
+		osState:   &osStateStore{},
 	}
 }
 
 func (m *memStore) Workloads() store.WorkloadStore { return m.workloads }
 func (m *memStore) Volumes() store.VolumeStore     { return m.volumes }
+func (m *memStore) OSState() store.OSStateStore    { return m.osState }
 func (m *memStore) Close() error                   { return nil }
+
+type osStateStore struct {
+	mu    sync.RWMutex
+	state *store.OSState
+}
+
+func (s *osStateStore) Get(_ context.Context) (*store.OSState, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.state == nil {
+		return nil, store.ErrNotFound
+	}
+	cp := *s.state
+	return &cp, nil
+}
+
+func (s *osStateStore) Put(_ context.Context, st *store.OSState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *st
+	s.state = &cp
+	return nil
+}
 
 type volumeStore struct {
 	mu    sync.RWMutex

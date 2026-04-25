@@ -13,6 +13,7 @@ import (
 	"github.com/geekgonecrazy/capsule/boot"
 	"github.com/geekgonecrazy/capsule/controllers"
 	"github.com/geekgonecrazy/capsule/core/reconciler"
+	coreupdate "github.com/geekgonecrazy/capsule/core/update"
 	corevolume "github.com/geekgonecrazy/capsule/core/volume"
 	"github.com/geekgonecrazy/capsule/core/workload"
 	"github.com/geekgonecrazy/capsule/router"
@@ -85,11 +86,6 @@ func main() {
 		})
 	}
 
-	capsuleCtl := &controllers.CapsuleController{
-		LogPath:        CapsuleLogPath,
-		CapsuleVersion: version,
-	}
-
 	// --- store ---
 	var st store.Store
 	if bootResult.MountedPerm {
@@ -106,6 +102,22 @@ func main() {
 		st = memory.New()
 	}
 	defer st.Close()
+
+	// --- A/B update service: handles UpdateOS / UpdateConfirm + tentative-deadline auto-rollback ---
+	updateSvc := coreupdate.New(st.OSState(), bootResult.ActiveSlot)
+	if isPID1 && bootResult.ActiveSlot != "" {
+		if err := updateSvc.OnStartup(ctx); err != nil {
+			slog.Error("update OnStartup failed", "err", err)
+		}
+	}
+
+	capsuleCtl := &controllers.CapsuleController{
+		LogPath:        CapsuleLogPath,
+		CapsuleVersion: version,
+		ActiveSlot:     bootResult.ActiveSlot,
+		OSStateStore:   st.OSState(),
+		UpdateService:  updateSvc,
+	}
 
 	// --- runtime driver (best-effort; workload APIs error out if nil) ---
 	var containerDriver runtime.ContainerDriver

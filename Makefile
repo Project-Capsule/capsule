@@ -1,8 +1,9 @@
 SHELL := /bin/bash
 BUILD_DIR := build
 DISK_IMAGE := $(BUILD_DIR)/disk.raw
+UPDATE_BUNDLE := $(BUILD_DIR)/update.tar
 
-.PHONY: all proto tools capsuled capsulectl image qemu clean test
+.PHONY: all proto tools capsuled capsulectl image update-bundle qemu clean test
 
 all: image
 
@@ -25,9 +26,19 @@ capsulectl:
 test:
 	go test ./...
 
-# Build the full Capsule image: rootfs Docker image -> squashfs -> bootable disk.
+# Build the full Capsule image: rootfs Docker image -> squashfs -> bootable
+# disk + streaming update bundle. pack.sh writes both build/disk.raw and
+# build/update.tar in a single pass.
 image:
 	bash image/build.sh
+
+# Build only the streaming update bundle — skip disk.raw assembly. Use this
+# for iteration on a running capsule (push + reboot). Full-image build still
+# happens via `make image` for fresh installs.
+update-bundle:
+	BUNDLE_ONLY=1 bash image/build.sh
+	@test -f $(UPDATE_BUNDLE) || (echo "missing $(UPDATE_BUNDLE)"; exit 1)
+	@ls -lh $(UPDATE_BUNDLE)
 
 # Phase 0 QEMU boot: BIOS (SeaBIOS default), virtio disk + net, serial console on
 # host stdio. KVM on Linux hosts accelerates; on macOS this falls back to TCG

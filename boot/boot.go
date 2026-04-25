@@ -9,6 +9,10 @@ import "context"
 type Result struct {
 	// MountedPerm is true if the /perm partition was mounted successfully.
 	MountedPerm bool
+	// ActiveSlot is "slot_a" / "slot_b" on a real (Linux PID-1) boot built
+	// with the A/B-aware syslinux config. Empty in dev mode (running off
+	// PID 1) or for old single-slot images.
+	ActiveSlot string
 }
 
 // Init performs PID 1 setup. On non-Linux it is a no-op (allows the daemon

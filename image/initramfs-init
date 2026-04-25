@@ -28,16 +28,25 @@ mount -t proc  -o nosuid,noexec,nodev      proc     /proc
 mount -t sysfs -o nosuid,noexec,nodev      sysfs    /sys
 mount -t devtmpfs -o nosuid,mode=0755      devtmpfs /dev
 
-# Load the modules we need for the root mount. Using busybox insmod with
-# explicit paths — no modprobe, no kmod, no libc dep on the initramfs.
-# Further modules (virtio_net, virtio_rng, bridge, kvm, tun, ...) are loaded
-# by capsuled after switch_root.
+# Load every module potentially needed to find + mount the root partition.
+# Using busybox insmod with explicit paths — no modprobe, no kmod, no libc
+# dep on the initramfs. Further modules (virtio_net, virtio_rng, bridge,
+# kvm, tun, ...) are loaded by capsuled after switch_root.
 #
-# In Alpine 3.20's linux-virt, virtio core + virtio_pci are built into the
-# kernel (see modules.builtin); only virtio_blk is a separate module. We
-# include the others as no-op skips so future kernel-config drift doesn't
-# silently regress the boot path.
-# Detect kernel version (single subdir under /lib/modules at build time).
+# Order matters — we don't run modprobe so dependencies are loaded by hand.
+# The same list is harmless on every host: drivers register their PCI/block
+# subsystems and bind to nothing on hardware that isn't there. So the
+# initramfs that boots in QEMU (virtio) is the same one that boots on a
+# Beelink (NVMe).
+#
+# Loading order:
+#   virtio + virtio_ring + virtio_pci_*       virtio bus + helpers + bus driver
+#   virtio_blk                                virtio block disks (QEMU/VPS)
+#   nvme_core + nvme                          NVMe block disks (Beelink, most modern hw)
+#   squashfs / overlay                        rootfs filesystems (always needed)
+#
+# Modules missing from the kernel (built-in on linux-virt; loadable on
+# linux-lts) are silently skipped — same code path works for both flavors.
 KVER=""
 for d in /lib/modules/*; do
     [ -d "$d" ] && KVER=$(basename "$d") && break
@@ -47,9 +56,12 @@ MODDIR="/lib/modules/$KVER/kernel"
 msg "kernel modules dir = $MODDIR"
 for m in drivers/virtio/virtio \
          drivers/virtio/virtio_ring \
+         drivers/virtio/virtio_pci_modern_dev \
+         drivers/virtio/virtio_pci_legacy_dev \
          drivers/virtio/virtio_pci \
          drivers/block/virtio_blk \
-         drivers/char/hw_random/virtio-rng \
+         drivers/nvme/host/nvme-core \
+         drivers/nvme/host/nvme \
          fs/squashfs/squashfs \
          fs/overlayfs/overlay; do
     f="$MODDIR/${m}.ko"
@@ -97,16 +109,21 @@ if [ ! -e "$ROOTDEV" ]; then
             for p in /sys/class/block/*; do
                 name=$(basename "$p")
                 [ -f "$p/partition" ] || continue
-                disk=$(basename "$(readlink "$p/..")")
-                sigpath="/sys/class/block/$disk/../wwid"
-                # MBR PARTUUID = <disk-signature>-NN where disk-signature is
-                # 4 bytes at MBR offset 0x1B8. Read it from the raw device.
+                # /sys/class/block/<part> is a symlink whose target ends
+                # in .../block/<disk>/<part>. Resolve it and grab the
+                # second-to-last component to get the parent disk name.
+                real=$(readlink -f "$p")
+                disk=$(basename "$(dirname "$real")")
+                # MBR PARTUUID = <disk-signature>-NN where the signature
+                # is 4 bytes at MBR offset 0x1B8 (little-endian on disk;
+                # Linux exposes it as big-endian hex in PARTUUID).
                 if [ -r "/dev/$disk" ]; then
                     sig=$(dd if=/dev/$disk bs=1 count=4 skip=440 2>/dev/null \
                           | od -An -tx1 | tr -d ' \n' \
                           | sed 's/^\(..\)\(..\)\(..\)\(..\)$/\4\3\2\1/')
                     partno=$(cat "$p/partition")
                     cand="${sig}-$(printf '%02x' "$partno")"
+                    msg "candidate $name disk=$disk sig=$sig partno=$partno -> $cand"
                     if [ "$cand" = "$want" ]; then
                         ROOTDEV="/dev/$name"
                         break
@@ -116,8 +133,8 @@ if [ ! -e "$ROOTDEV" ]; then
             ;;
         LABEL=*)
             # For ext4 we could read the label from the superblock, but the
-            # A/B design (Plan §) writes squashfs raw to the slot partitions
-            # so there's no ext4 label to find. Fall back to plain device.
+            # A/B design writes squashfs raw to the slot partitions so
+            # there's no ext4 label to find. Fall back to plain device.
             ;;
     esac
 fi

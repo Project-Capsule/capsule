@@ -43,7 +43,13 @@ echo "==> Running packer"
 docker run --rm \
   --platform=linux/amd64 \
   -v "$BUILD_DIR:/work" \
+  -e "BUNDLE_ONLY=${BUNDLE_ONLY:-0}" \
+  -e "CAPSULE_VERSION=${CAPSULE_VERSION}" \
   "$PACKER_TAG"
 
 echo "==> Done."
-ls -lh "$BUILD_DIR/rootfs.sqsh" "$BUILD_DIR/disk.raw"
+if [ "${BUNDLE_ONLY:-0}" = "1" ]; then
+  ls -lh "$BUILD_DIR/rootfs.sqsh" "$BUILD_DIR/update.tar"
+else
+  ls -lh "$BUILD_DIR/rootfs.sqsh" "$BUILD_DIR/update.tar" "$BUILD_DIR/disk.raw"
+fi
