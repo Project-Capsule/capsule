@@ -38,15 +38,9 @@ var earlyMounts = []mountSpec{
 func initPlatform(ctx context.Context) (Result, error) {
 	var res Result
 
-	// Alpine's initramfs mounts / read-only even when the kernel cmdline
-	// says 'rw'. Remount it read-write up front so we can install
-	// /etc/resolv.conf, write logs, and generally behave like a normal init.
-	// A/B updates (Phase 3) will switch to squashfs and we'll revisit: in
-	// that world the squashfs stays read-only and only tmpfs overlays / PERM
-	// are writeable.
-	if err := unix.Mount("", "/", "", unix.MS_REMOUNT, ""); err != nil {
-		slog.Warn("remount / rw failed", "err", err)
-	}
+	// Rootfs is overlayfs (lower=squashfs ro, upper=tmpfs rw) — already rw,
+	// no remount needed. Anything we write under / lands on the tmpfs upper
+	// layer and is gone after reboot; persistent state goes under /perm.
 
 	for _, m := range earlyMounts {
 		if err := mountOne(m); err != nil {
@@ -70,9 +64,18 @@ func initPlatform(ctx context.Context) (Result, error) {
 		slog.Warn("failed to bring up loopback", "err", err)
 	}
 
-	// Bring up the first non-loopback ethernet interface and DHCP for an
-	// address. This is deliberately minimal for phase 0 — a proper
-	// declarative network config comes with later phases.
+	// Load networking + bridging + KVM + virtio_net kernel modules. Must run
+	// BEFORE bringUpDefaultEth — our minimal initramfs only loads virtio_blk
+	// (enough to mount the rootfs); virtio_net + everything bridge/VM-side is
+	// pulled in here. Best-effort: failures only break the corresponding
+	// workload kind.
+	loadBridgeModules()
+	if err := enableIPForward(); err != nil {
+		slog.Warn("failed to enable IP forwarding", "err", err)
+	}
+
+	// Bring up the first non-loopback ethernet interface with the QEMU SLIRP
+	// static defaults. A proper declarative network config lands later.
 	if err := bringUpDefaultEth(); err != nil {
 		slog.Warn("failed to configure ethernet", "err", err)
 	}
@@ -81,14 +84,6 @@ func initPlatform(ctx context.Context) (Result, error) {
 		slog.Error("failed to mount /perm", "err", err)
 	} else {
 		res.MountedPerm = true
-	}
-
-	// Bridge networking needs a few kernel modules loaded and IP forwarding
-	// enabled. These are best-effort: if they fail, only bridge-mode
-	// workloads will break; host mode and default mode keep working.
-	loadBridgeModules()
-	if err := enableIPForward(); err != nil {
-		slog.Warn("failed to enable IP forwarding", "err", err)
 	}
 
 	return res, nil
@@ -104,7 +99,7 @@ func loadBridgeModules() {
 	// Firecracker. On non-virt hosts they'll fail to load — that's fine,
 	// only MicroVM workloads will fail later.
 	for _, m := range []string{
-		"virtio_rng",
+		"virtio_net", "virtio_rng",
 		"bridge", "br_netfilter", "veth", "nf_nat",
 		"kvm", "kvm_intel", "kvm_amd",
 		"tun",

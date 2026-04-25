@@ -5,19 +5,20 @@
 #   /work/rootfs.tar    Capsule rootfs as a tar (from `docker export`).
 #
 # Outputs (written to /work):
-#   /work/rootfs.sqsh   squashfs of the rootfs (produced for reference; not yet
-#                       used to boot — see Phase 0 note below).
+#   /work/rootfs.sqsh   squashfs of the rootfs (the actual rootfs image written
+#                       to the ROOTFS partition — the boot chain is
+#                       squashfs -> overlayfs(tmpfs upper) -> switch_root,
+#                       so the rootfs is immutable on disk).
 #   /work/disk.raw      bootable raw disk image.
 #
-# Partition layout (Phase 1):
-#   1. FAT32  /boot     256 MiB   kernel + initramfs + syslinux
-#   2. ext4   ROOTFS    rootfs size + 50 MiB headroom
-#   3. ext4   PERM      PERM_SIZE_MIB (default 2048)
+# Partition layout (Phase 2 — pre-A/B):
+#   1. FAT32  KEELBOOT  256 MiB   kernel + custom initramfs + syslinux
+#   2. raw    ROOTFS    squashfs size + ~50 MiB headroom
+#   3. raw    PERM      PERM_SIZE_MIB (default 2048) — LVM PV, formatted on first boot
 #
-# Phase 0 deliberately ships the rootfs on ext4 rather than squashfs. Alpine's
-# stock initramfs-virt does not include squashfs.ko, so using squashfs as root
-# would require rebuilding the initramfs. We defer that to Phase 3 where A/B
-# update work is done together with the initramfs changes.
+# The rootfs is written as a raw squashfs image (no filesystem wrapper).
+# Our custom initramfs (built in Dockerfile.packer) mounts it ro and layers
+# a tmpfs overlay before switch_root'ing into /sbin/init (capsuled).
 
 set -euo pipefail
 
@@ -26,34 +27,29 @@ ROOTFS_TAR="$WORK/rootfs.tar"
 SQSH="$WORK/rootfs.sqsh"
 DISK="$WORK/disk.raw"
 BOOT_IMG="$WORK/boot.fat"
-ROOT_IMG="$WORK/rootfs.ext4"
 PERM_IMG="$WORK/perm.ext4"
 PERM_SIZE_MIB="${PERM_SIZE_MIB:-2048}"
 
 [ -f "$ROOTFS_TAR" ] || { echo "pack.sh: missing $ROOTFS_TAR"; exit 1; }
 
-# ---- 1. extract rootfs, produce squashfs (reference only for now) ---------
+# ---- 1. extract rootfs, produce the squashfs that is the rootfs image ------
 rm -rf /tmp/rootfs && mkdir -p /tmp/rootfs
 tar -C /tmp/rootfs -xf "$ROOTFS_TAR"
 [ -x /tmp/rootfs/sbin/init ] || { echo "pack.sh: /sbin/init missing"; exit 1; }
 
 rm -f "$SQSH"
 mksquashfs /tmp/rootfs "$SQSH" -noappend -comp zstd -all-root -quiet
-echo "pack.sh: squashfs size = $(stat -c%s "$SQSH") bytes (reference artifact)"
+SQSH_BYTES=$(stat -c%s "$SQSH")
+echo "pack.sh: squashfs size = ${SQSH_BYTES} bytes"
 
-# ---- 2. build the ext4 rootfs image ----------------------------------------
-ROOTFS_BYTES=$(du -sb /tmp/rootfs | awk '{print $1}')
-# Add 50 MiB headroom for ext4 metadata + small writable room.
-ROOTFS_SIZE=$(( ROOTFS_BYTES + 50 * 1024 * 1024 ))
-# Round to nearest MiB.
+# ---- 2. size the rootfs partition to fit the squashfs + headroom -----------
+# 50 MiB headroom so a future update whose squashfs is a bit larger still
+# fits without re-partitioning. The partition holds the raw squashfs bytes;
+# excess space is ignored by the initramfs mount.
+ROOTFS_SIZE=$(( SQSH_BYTES + 50 * 1024 * 1024 ))
 ROOTFS_MIB=$(( (ROOTFS_SIZE + 1024*1024 - 1) / (1024*1024) ))
 ROOTFS_SIZE=$(( ROOTFS_MIB * 1024 * 1024 ))
-echo "pack.sh: ext4 rootfs image = ${ROOTFS_MIB} MiB"
-
-rm -f "$ROOT_IMG"
-truncate -s "$ROOTFS_SIZE" "$ROOT_IMG"
-# -d populates the filesystem at format time; no mount required.
-mkfs.ext4 -q -L ROOTFS -d /tmp/rootfs -F "$ROOT_IMG"
+echo "pack.sh: rootfs partition size = ${ROOTFS_MIB} MiB (squashfs inside)"
 
 # ---- 3. build (or keep) the PERM partition --------------------------------
 # PERM holds the LVM physical volume for VG "capsule": meta LV (ext4,
@@ -108,7 +104,9 @@ mcopy -i "$BOOT_IMG" /usr/share/syslinux/libcom32.c32 ::/syslinux/libcom32.c32
 mcopy -i "$BOOT_IMG" /usr/share/syslinux/libutil.c32  ::/syslinux/libutil.c32
 mcopy -i "$BOOT_IMG" /usr/share/syslinux/menu.c32     ::/syslinux/menu.c32
 
-# Alpine's initramfs-virt handles ext4 root natively with no extra modules.
+# Our custom initramfs (built in Dockerfile.packer) mounts the root partition
+# as squashfs ro, layers a tmpfs overlay, and switch_roots. Kernel cmdline
+# passes rootfstype=squashfs so the initramfs doesn't have to guess.
 cat >/tmp/syslinux.cfg <<'EOF'
 DEFAULT capsule
 TIMEOUT 20
@@ -117,7 +115,7 @@ LABEL capsule
   MENU LABEL Capsule (SLOT_A)
   KERNEL /vmlinuz
   INITRD /initramfs
-  APPEND root=/dev/vda2 rootfstype=ext4 rw console=ttyS0,115200n8
+  APPEND root=/dev/vda2 rootfstype=squashfs ro random.trust_cpu=on console=ttyS0,115200n8
 EOF
 mcopy -i "$BOOT_IMG" /tmp/syslinux.cfg ::/syslinux/syslinux.cfg
 
@@ -145,7 +143,11 @@ $DISK-part3 : start=$PERM_START, size=$PERM_SECTORS, type=83
 EOF
 
 dd if="$BOOT_IMG" of="$DISK" bs=512 seek="$BOOT_START" count="$BOOT_SECTORS" conv=notrunc status=none
-dd if="$ROOT_IMG" of="$DISK" bs=512 seek="$ROOT_START" count="$ROOT_SECTORS" conv=notrunc status=none
+# ROOTFS partition is raw squashfs — dd the .sqsh directly. The count is
+# capped to SQSH's actual size (not the partition's full allocated size),
+# so leftover bytes in the partition stay zeroed. squashfs's mount code
+# only reads up to the embedded superblock size regardless.
+dd if="$SQSH"     of="$DISK" bs=512 seek="$ROOT_START" conv=notrunc status=none
 dd if="$PERM_IMG" of="$DISK" bs=512 seek="$PERM_START" count="$PERM_SECTORS" conv=notrunc status=none
 
 dd if=/usr/share/syslinux/mbr.bin of="$DISK" bs=440 count=1 conv=notrunc status=none

@@ -1,6 +1,7 @@
 # Packer: a Linux/amd64 helper image that turns a Capsule rootfs tarball into
-# a bootable raw disk image. Pulls the Alpine linux-virt kernel + initramfs
-# and lays the partitions out using mtools + dd (no loop devices needed).
+# a bootable raw disk image. Pulls the Alpine linux-virt kernel, builds a
+# custom initramfs with squashfs + overlayfs + virtio support, and lays the
+# partitions out using mtools + dd (no loop devices needed).
 FROM --platform=linux/amd64 alpine:3.20
 
 RUN apk add --no-cache \
@@ -12,21 +13,67 @@ RUN apk add --no-cache \
       e2fsprogs-extra \
       sfdisk \
       syslinux \
+      cpio \
+      gzip \
+      zstd \
+      xz \
       xxd
 
-# Fetch the Alpine linux-virt kernel and initramfs into /bootfiles. We do
-# this by apk-installing linux-virt into a throwaway root and pulling the
-# two files we need. mkinitfs's default 'base virtio squashfs ext4' feature
-# set is exactly what we need to boot our squashfs rootfs.
+# Fetch the Alpine linux-virt kernel + module tree and build a custom
+# initramfs. The stock `initramfs-virt` shipped with linux-virt lacks
+# squashfs.ko + overlay.ko and its init script doesn't do the
+# squashfs-rootfs-with-tmpfs-overlay pattern we need for immutable boot.
+# So we build our own: busybox-static + the virtio / squashfs / overlay
+# kernel modules + a ~100-line /init script copied from image/initramfs-init.
+#
+# linux-virt is intentionally unpinned for now — a future commit will pin
+# the exact kernel version once A/B updates land and determinism matters.
 RUN apk --no-cache --initdb --root /tmp/kroot \
       --keys-dir /etc/apk/keys \
       --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/main \
       --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
-      add alpine-base linux-virt \
+      add alpine-base linux-virt busybox-static \
  && mkdir -p /bootfiles \
- && cp /tmp/kroot/boot/vmlinuz-virt   /bootfiles/vmlinuz \
- && cp /tmp/kroot/boot/initramfs-virt /bootfiles/initramfs \
- && rm -rf /tmp/kroot
+ && cp /tmp/kroot/boot/vmlinuz-virt /bootfiles/vmlinuz
+
+COPY image/initramfs-init /initramfs-init
+
+# Build the initramfs. /tmp/initramfs is the staging root; contents get
+# cpio'd into /bootfiles/initramfs as a newc-format gzipped archive that
+# the kernel can unpack at boot.
+RUN set -eux \
+ && KVER=$(ls /tmp/kroot/lib/modules/) \
+ && echo "building initramfs for kernel $KVER" \
+ && ROOT=/tmp/initramfs \
+ && rm -rf "$ROOT" \
+ && mkdir -p "$ROOT"/bin "$ROOT"/sbin "$ROOT"/lib/modules \
+             "$ROOT"/proc "$ROOT"/sys "$ROOT"/dev \
+             "$ROOT"/mnt/lower "$ROOT"/mnt/upper "$ROOT"/mnt/sysroot \
+ # Busybox-static is a single ELF with every applet linked in. One binary +
+ # symlinks gives us a full shell + coreutils + mount + modprobe + switch_root.
+ && cp /tmp/kroot/bin/busybox.static "$ROOT"/bin/busybox \
+ && for applet in sh mount umount insmod switch_root cat grep cut head tail \
+                  mkdir mknod chmod chroot echo sleep tr sed od dd printf \
+                  basename readlink find ls ln rm wc awk env test; do \
+      ln -sf busybox "$ROOT/bin/$applet"; \
+    done \
+ && ln -sf ../bin/busybox "$ROOT/sbin/switch_root" \
+ # Copy the whole module tree — simpler than surgically picking modules, and
+ # the kernel discards the initramfs pages after switch_root anyway.
+ && cp -a /tmp/kroot/lib/modules/$KVER "$ROOT"/lib/modules/$KVER \
+ # Decompress any compressed modules so busybox insmod can load them.
+ # Alpine 3.20 uses zstd; handle the older gz/xz variants too for robustness.
+ && find "$ROOT"/lib/modules -name "*.ko.zst" -exec zstd -d --rm -q {} \; \
+ && find "$ROOT"/lib/modules -name "*.ko.gz"  -exec gunzip {} \; \
+ && find "$ROOT"/lib/modules -name "*.ko.xz"  -exec xz -d --quiet {} \; \
+ # Install our /init.
+ && cp /initramfs-init "$ROOT"/init \
+ && chmod +x "$ROOT"/init \
+ # Pack the cpio archive (newc format, gzip compressed — what the kernel
+ # expects for an initramfs image).
+ && (cd "$ROOT" && find . -print0 | cpio --null -o -H newc 2>/dev/null | gzip -9 > /bootfiles/initramfs) \
+ && ls -lh /bootfiles/vmlinuz /bootfiles/initramfs \
+ && rm -rf "$ROOT" /tmp/kroot
 
 COPY image/pack.sh /pack.sh
 RUN chmod +x /pack.sh

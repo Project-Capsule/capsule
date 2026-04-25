@@ -1,0 +1,163 @@
+#!/bin/sh
+# Capsule initramfs init.
+#
+# Mounts the squashfs rootfs (from kernel cmdline `root=...`) read-only, layers
+# a tmpfs on top via overlayfs, then switch_roots into it. This gives capsuled
+# an rw rootfs where only the tmpfs upper layer is actually writable — the
+# squashfs is truly immutable on disk.
+#
+# Kernel cmdline expected: root=<dev-or-partuuid> rootfstype=squashfs ro
+# (and anything else capsuled needs, e.g. capsule.slot=a).
+
+# Deliberately not using `set -e`: an init script should plow through and
+# drop to a rescue shell rather than silently exit to nowhere. We rely on
+# explicit error checks + die() for the fatal paths.
+
+# PATH is inherited by capsuled (as PID 1 after switch_root) and by its
+# children (containerd, runc, etc.). Include the standard /usr paths so
+# containerd can find the runc binary at /usr/bin/runc after switch_root.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+msg() { echo "[initramfs] $*" >/dev/kmsg 2>/dev/null || echo "[initramfs] $*"; }
+die() { msg "FATAL: $*"; exec /bin/sh; }
+
+msg "capsule initramfs starting"
+
+mount -t proc  -o nosuid,noexec,nodev      proc     /proc
+mount -t sysfs -o nosuid,noexec,nodev      sysfs    /sys
+mount -t devtmpfs -o nosuid,mode=0755      devtmpfs /dev
+
+# Load the modules we need for the root mount. Using busybox insmod with
+# explicit paths — no modprobe, no kmod, no libc dep on the initramfs.
+# Further modules (virtio_net, virtio_rng, bridge, kvm, tun, ...) are loaded
+# by capsuled after switch_root.
+#
+# In Alpine 3.20's linux-virt, virtio core + virtio_pci are built into the
+# kernel (see modules.builtin); only virtio_blk is a separate module. We
+# include the others as no-op skips so future kernel-config drift doesn't
+# silently regress the boot path.
+# Detect kernel version (single subdir under /lib/modules at build time).
+KVER=""
+for d in /lib/modules/*; do
+    [ -d "$d" ] && KVER=$(basename "$d") && break
+done
+[ -n "$KVER" ] || die "no kernel modules dir under /lib/modules"
+MODDIR="/lib/modules/$KVER/kernel"
+msg "kernel modules dir = $MODDIR"
+for m in drivers/virtio/virtio \
+         drivers/virtio/virtio_ring \
+         drivers/virtio/virtio_pci \
+         drivers/block/virtio_blk \
+         drivers/char/hw_random/virtio-rng \
+         fs/squashfs/squashfs \
+         fs/overlayfs/overlay; do
+    f="$MODDIR/${m}.ko"
+    if [ -f "$f" ]; then
+        if insmod "$f"; then
+            msg "loaded $m"
+        else
+            msg "insmod $m FAILED (rc=$?)"
+        fi
+    else
+        msg "skip $m (not in initramfs — built-in?)"
+    fi
+done
+
+# Parse cmdline. root=LABEL= / root=UUID= / root=PARTUUID= are handled by
+# resolving under /dev/disk/by-*/ once devtmpfs + (future) mdev come up.
+ROOT=""
+ROOTFSTYPE="squashfs"
+INIT="/sbin/init"
+for arg in $(cat /proc/cmdline); do
+    case "$arg" in
+        root=*)       ROOT="${arg#root=}" ;;
+        rootfstype=*) ROOTFSTYPE="${arg#rootfstype=}" ;;
+        init=*)       INIT="${arg#init=}" ;;
+    esac
+done
+[ -n "$ROOT" ] || die "no root= in cmdline"
+
+# Resolve LABEL=/UUID=/PARTUUID= using udev-style /dev/disk/by-*.
+case "$ROOT" in
+    LABEL=*)    ROOTDEV="/dev/disk/by-label/${ROOT#LABEL=}" ;;
+    UUID=*)     ROOTDEV="/dev/disk/by-uuid/${ROOT#UUID=}" ;;
+    PARTUUID=*) ROOTDEV="/dev/disk/by-partuuid/${ROOT#PARTUUID=}" ;;
+    *)          ROOTDEV="$ROOT" ;;
+esac
+
+# Block device nodes appear via devtmpfs, but the /dev/disk/by-* symlinks are
+# created by udev/mdev which we don't run. Build the ones we might need by
+# hand by scanning /sys/class/block.
+if [ ! -e "$ROOTDEV" ]; then
+    msg "resolving $ROOTDEV from /sys"
+    case "$ROOT" in
+        PARTUUID=*)
+            want="${ROOT#PARTUUID=}"
+            for p in /sys/class/block/*; do
+                name=$(basename "$p")
+                [ -f "$p/partition" ] || continue
+                disk=$(basename "$(readlink "$p/..")")
+                sigpath="/sys/class/block/$disk/../wwid"
+                # MBR PARTUUID = <disk-signature>-NN where disk-signature is
+                # 4 bytes at MBR offset 0x1B8. Read it from the raw device.
+                if [ -r "/dev/$disk" ]; then
+                    sig=$(dd if=/dev/$disk bs=1 count=4 skip=440 2>/dev/null \
+                          | od -An -tx1 | tr -d ' \n' \
+                          | sed 's/^\(..\)\(..\)\(..\)\(..\)$/\4\3\2\1/')
+                    partno=$(cat "$p/partition")
+                    cand="${sig}-$(printf '%02x' "$partno")"
+                    if [ "$cand" = "$want" ]; then
+                        ROOTDEV="/dev/$name"
+                        break
+                    fi
+                fi
+            done
+            ;;
+        LABEL=*)
+            # For ext4 we could read the label from the superblock, but the
+            # A/B design (Plan §) writes squashfs raw to the slot partitions
+            # so there's no ext4 label to find. Fall back to plain device.
+            ;;
+    esac
+fi
+
+msg "root device = $ROOTDEV (fstype=$ROOTFSTYPE)"
+
+# Wait up to 10 seconds for the block device to settle. virtio_blk module
+# load + PCI bind + device-node creation can take a beat.
+tries=0
+while [ ! -b "$ROOTDEV" ] && [ $tries -lt 100 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+done
+if [ ! -b "$ROOTDEV" ]; then
+    msg "/dev contents:"; ls /dev | tr '\n' ' '; echo
+    msg "/sys/class/block contents:"; ls /sys/class/block 2>/dev/null | tr '\n' ' '; echo
+    die "root device $ROOTDEV never appeared"
+fi
+
+msg "step: mkdir /mnt"
+mkdir -p /mnt/lower /mnt/upper /mnt/sysroot
+
+msg "step: mount squashfs ro $ROOTDEV /mnt/lower"
+mount -t "$ROOTFSTYPE" -o ro "$ROOTDEV" /mnt/lower \
+    || die "mount $ROOTFSTYPE $ROOTDEV failed"
+
+msg "step: mount tmpfs /mnt/upper"
+mount -t tmpfs -o mode=0755 tmpfs /mnt/upper
+mkdir -p /mnt/upper/upper /mnt/upper/work
+
+msg "step: mount overlay /mnt/sysroot"
+mount -t overlay overlay \
+    -o "lowerdir=/mnt/lower,upperdir=/mnt/upper/upper,workdir=/mnt/upper/work" \
+    /mnt/sysroot \
+    || die "overlayfs mount failed"
+
+# Don't mount --move /proc /sys /dev into the new root — capsuled's
+# earlyMounts re-creates them after switch_root, and the kernel's switch_root
+# applet handles cleanup of the old initramfs mounts.
+
+msg "step: switch_root -> /mnt/sysroot $INIT"
+exec switch_root /mnt/sysroot "$INIT"
+die "switch_root returned (should not happen)"
