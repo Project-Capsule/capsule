@@ -157,6 +157,11 @@ func main() {
 			VM:       vmDriver,
 			Interval: 2 * time.Second,
 		})
+		// Wake the reconciler immediately on Apply/Start/Stop/Restart/Delete
+		// so the operator doesn't pay a tick interval (~2s) of latency on
+		// every desired-state change. Idle drift between ticks is still
+		// caught by the regular timer.
+		workloadSvc.SetOnChange(rec.Kick)
 		go rec.Run(ctx)
 	}
 

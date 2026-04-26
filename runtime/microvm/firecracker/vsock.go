@@ -58,8 +58,14 @@ func dialGuest(ctx context.Context, udsPath string, port uint32) (*grpc.ClientCo
 	)
 }
 
-// waitForGuestReady dials the guest agent and sends Ping until it succeeds
-// or timeout elapses. Returns the live gRPC connection on success.
+// waitForGuestReady dials the guest agent and sends Ping until it
+// succeeds or timeout elapses. Returns the live gRPC connection on
+// success. Polled tightly (50ms) because this sits in the apply→exec
+// critical path — the VM is usually ready within a few hundred ms of
+// Firecracker spawn, and a 250ms inter-attempt sleep was costing us
+// ~125ms of avg latency on every cold VM start. Per-attempt dial/ping
+// timeouts stay generous (2s) so a single hiccup doesn't fail the
+// whole wait.
 func waitForGuestReady(ctx context.Context, udsPath string, timeout time.Duration) (*grpc.ClientConn, error) {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
@@ -82,7 +88,7 @@ func waitForGuestReady(ctx context.Context, udsPath string, timeout time.Duratio
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(250 * time.Millisecond):
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 	return nil, fmt.Errorf("guest agent not ready within %s: %w", timeout, lastErr)

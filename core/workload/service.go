@@ -21,9 +21,10 @@ import (
 // Service owns Workload lifecycle: persist desired state; tear down runtime
 // state on delete. Reconcile (desired → actual) lives in core/reconciler.
 type Service struct {
-	store  store.Store
-	driver runtime.ContainerDriver
-	vm     runtime.VMDriver
+	store    store.Store
+	driver   runtime.ContainerDriver
+	vm       runtime.VMDriver
+	onChange func()
 }
 
 // New returns a Service wired to the given store and drivers. Either
@@ -31,6 +32,19 @@ type Service struct {
 // Apply of workloads whose kind requires that driver will fail.
 func New(s store.Store, d runtime.ContainerDriver, vm runtime.VMDriver) *Service {
 	return &Service{store: s, driver: d, vm: vm}
+}
+
+// SetOnChange installs a callback fired after any operation that mutates
+// desired state (Apply / Start / Stop / Restart / Delete). Used by
+// cmd/capsuled to wire Reconciler.Kick so a freshly-applied workload
+// gets reconciled immediately instead of waiting for the next tick.
+// Single-writer: call once at startup before serving requests.
+func (s *Service) SetOnChange(fn func()) { s.onChange = fn }
+
+func (s *Service) notifyChange() {
+	if s.onChange != nil {
+		s.onChange()
+	}
 }
 
 // Apply validates the workload, persists it as-is (without status), and
@@ -55,6 +69,7 @@ func (s *Service) Apply(ctx context.Context, w *capsulev1.Workload) (*capsulev1.
 	if err := s.store.Workloads().Put(ctx, merged); err != nil {
 		return nil, err
 	}
+	s.notifyChange()
 	return merged, nil
 }
 
@@ -110,7 +125,11 @@ func (s *Service) Delete(ctx context.Context, name string) error {
 		}
 	}
 	// Runtime is gone (or never existed). Drop the store row.
-	return s.store.Workloads().Delete(ctx, name)
+	if err := s.store.Workloads().Delete(ctx, name); err != nil {
+		return err
+	}
+	s.notifyChange()
+	return nil
 }
 
 // LogPath returns the path to a workload's combined stdout+stderr log
@@ -196,13 +215,19 @@ func (s *Service) Restart(ctx context.Context, name string) error {
 		if s.vm == nil {
 			return ErrNoRuntime
 		}
-		return s.vm.Remove(ctx, name)
+		if err := s.vm.Remove(ctx, name); err != nil {
+			return err
+		}
 	default:
 		if s.driver == nil {
 			return ErrNoRuntime
 		}
-		return s.driver.Remove(ctx, name)
+		if err := s.driver.Remove(ctx, name); err != nil {
+			return err
+		}
 	}
+	s.notifyChange()
+	return nil
 }
 
 // Stop flips desired_state to STOPPED and tears down runtime state.
@@ -227,6 +252,7 @@ func (s *Service) Stop(ctx context.Context, name string) error {
 			_ = s.driver.Remove(ctx, name)
 		}
 	}
+	s.notifyChange()
 	return nil
 }
 
@@ -245,7 +271,11 @@ func (s *Service) Start(ctx context.Context, name string) error {
 		Phase:   capsulev1.WorkloadPhase_WORKLOAD_PHASE_PENDING,
 		Message: "starting",
 	}
-	return s.store.Workloads().Put(ctx, w)
+	if err := s.store.Workloads().Put(ctx, w); err != nil {
+		return err
+	}
+	s.notifyChange()
+	return nil
 }
 
 // SetStatus is used by the reconciler to record observed state.

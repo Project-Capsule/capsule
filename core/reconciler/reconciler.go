@@ -24,7 +24,8 @@ type Config struct {
 
 // Reconciler runs a desired→actual reconciliation loop.
 type Reconciler struct {
-	cfg Config
+	cfg  Config
+	wake chan struct{}
 }
 
 // New returns a Reconciler. Missing Interval defaults to 2 seconds.
@@ -32,7 +33,19 @@ func New(cfg Config) *Reconciler {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 2 * time.Second
 	}
-	return &Reconciler{cfg: cfg}
+	return &Reconciler{cfg: cfg, wake: make(chan struct{}, 1)}
+}
+
+// Kick requests an immediate reconciliation pass without waiting for the
+// next tick. Safe to call from any goroutine; non-blocking — when a wake
+// is already queued, additional Kicks coalesce into the queued one. Used
+// by core/workload.Service to make Apply/Start/Stop/Restart/Delete feel
+// responsive instead of paying up to one tick interval (~2s) of latency.
+func (r *Reconciler) Kick() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
 }
 
 // Run drives the reconciliation loop until ctx is cancelled.
@@ -47,6 +60,8 @@ func (r *Reconciler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			r.Tick(ctx)
+		case <-r.wake:
 			r.Tick(ctx)
 		}
 	}
