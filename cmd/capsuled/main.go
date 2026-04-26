@@ -5,8 +5,10 @@ import (
 	"flag"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -38,12 +40,24 @@ func main() {
 	addr := flag.String("addr", ":50000", "gRPC listen address")
 	flag.Parse()
 
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	isPID1 := os.Getpid() == 1
+
+	// Set up slog before boot.Init so that any errors during early boot
+	// (mounts, module loads, NIC bring-up) are visible. On PID 1 we tee
+	// to /dev/tty0 — initramfs already mounted devtmpfs so it's open-able
+	// — to ensure logs reach HDMI on hardware where the kernel cmdline
+	// console=tty0 console=ttyS0 routes /dev/console at the (nonexistent
+	// on this Beelink) serial port.
+	earlyWriters := []io.Writer{os.Stderr}
+	if isPID1 {
+		if tty, err := os.OpenFile("/dev/tty0", os.O_WRONLY, 0); err == nil {
+			earlyWriters = append(earlyWriters, tty)
+		}
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(earlyWriters...), &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.Info("capsule starting", "version", version, "pid1", isPID1)
 
 	bootResult := boot.Result{}
@@ -59,16 +73,12 @@ func main() {
 		go boot.ReapZombies(ctx)
 	}
 
-	// Now that /run is mounted (if PID 1) we can tee slog to a file so
-	// CapsuleService.StreamLogs can tail it. Best-effort: if we can't
-	// open the file we stick with stderr-only (which reaches the
-	// capsule console on PID 1 anyway). We re-set the default handler
-	// here instead of earlier so boot.Init's log lines don't require
-	// /run to be mountable.
+	// /run is mounted now — extend the slog tee to also write the
+	// capsule log file so CapsuleService.StreamLogs can tail it.
 	if err := os.MkdirAll("/run/capsule", 0o755); err == nil {
 		if f, err := os.OpenFile(CapsuleLogPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
-			tee := io.MultiWriter(os.Stderr, f)
-			slog.SetDefault(slog.New(slog.NewTextHandler(tee, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			writers := append(earlyWriters, f)
+			slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(writers...), &slog.HandlerOptions{Level: slog.LevelInfo})))
 			slog.Info("capsule log tee", "path", CapsuleLogPath)
 		}
 	}
@@ -148,6 +158,21 @@ func main() {
 			Interval: 2 * time.Second,
 		})
 		go rec.Run(ctx)
+	}
+
+	// Banner with IP for HDMI operators — print after gRPC has had a moment
+	// to bind. Goroutine so we don't block Serve.
+	if isPID1 {
+		go func() {
+			time.Sleep(2 * time.Second)
+			port := 50000
+			if _, p, err := net.SplitHostPort(*addr); err == nil {
+				if n, err := strconv.Atoi(p); err == nil {
+					port = n
+				}
+			}
+			boot.PrintBanner(port)
+		}()
 	}
 
 	if err := router.Serve(ctx, router.Config{

@@ -15,16 +15,16 @@ service CapsuleService {
   // UpdateOS streams a new OS update bundle from the operator to the
   // capsule. The first message is metadata (size + sha256); subsequent
   // messages carry chunked bytes. Capsuled writes the new rootfs to the
-  // inactive A/B slot, copies the kernel + initramfs into /boot, sets a
-  // syslinux one-shot for the next boot, persists pending state, and
+  // inactive A/B slot, copies the kernel + initramfs into /boot, flips
+  // GRUB's `set default=` to the new slot, persists pending state, and
   // schedules a reboot. The capsule comes back in TENTATIVE mode and
   // waits for UpdateConfirm — if that doesn't arrive before the deadline,
-  // it auto-reboots and the bootloader's DEFAULT picks the prior slot.
+  // capsuled rolls `set default=` back and reboots into the prior slot.
   rpc UpdateOS(stream UpdateOSRequest) returns (UpdateOSResponse);
 
   // UpdateConfirm commits a tentative slot. Operator runs this after
-  // they've verified the new slot is healthy. Rewrites the syslinux DEFAULT
-  // and clears pending state.
+  // they've verified the new slot is healthy. Persists the GRUB default
+  // selection and clears pending state.
   rpc UpdateConfirm(UpdateConfirmRequest) returns (UpdateConfirmResponse);
 }
 
@@ -79,6 +79,10 @@ message GetInfoResponse {
   // LVM thin-pool data currently allocated. Capsule fills up when this
   // approaches thinpool_total_bytes.
   uint64 thinpool_used_bytes = 18;
+  // Capsule's current wall-clock time as Unix seconds. Lets capsulectl
+  // surface clock skew between operator and capsule — drift breaks A/B
+  // deadline-passed messages, log correlation, etc.
+  int64 local_time_unix = 19;
 }
 
 message CapsuleLogsRequest {

@@ -90,7 +90,7 @@ func teardownPortMappings(workload string) {
 	} {
 		for _, rule := range findRulesWithComment(spec.table, spec.chain, comment) {
 			args := append([]string{"-t", spec.table, "-D", spec.chain}, rule...)
-			_ = exec.Command("/sbin/iptables", args...).Run()
+			_ = exec.Command("/usr/sbin/iptables", args...).Run()
 		}
 	}
 }
@@ -106,11 +106,11 @@ func addIptablesRule(table, chain string, body []string) error {
 	boot.ExecMu.Lock()
 	defer boot.ExecMu.Unlock()
 	checkArgs := append([]string{"-t", table, "-C", chain}, body...)
-	if err := exec.Command("/sbin/iptables", checkArgs...).Run(); err == nil {
+	if err := exec.Command("/usr/sbin/iptables", checkArgs...).Run(); err == nil {
 		return nil
 	}
 	appendArgs := append([]string{"-t", table, "-A", chain}, body...)
-	out, err := exec.Command("/sbin/iptables", appendArgs...).CombinedOutput()
+	out, err := exec.Command("/usr/sbin/iptables", appendArgs...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("iptables -A %s %s: %w: %s", table, chain, err, strings.TrimSpace(string(out)))
 	}
@@ -121,7 +121,7 @@ func addIptablesRule(table, chain string, body []string) error {
 // the given iptables comment, as argv suitable for -D. Uses
 // `iptables -S` so we can match on the comment exactly.
 func findRulesWithComment(table, chain, comment string) [][]string {
-	cmd := exec.Command("/sbin/iptables", "-t", table, "-S", chain)
+	cmd := exec.Command("/usr/sbin/iptables", "-t", table, "-S", chain)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil

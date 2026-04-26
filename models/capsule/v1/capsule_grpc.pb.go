@@ -41,15 +41,15 @@ type CapsuleServiceClient interface {
 	// UpdateOS streams a new OS update bundle from the operator to the
 	// capsule. The first message is metadata (size + sha256); subsequent
 	// messages carry chunked bytes. Capsuled writes the new rootfs to the
-	// inactive A/B slot, copies the kernel + initramfs into /boot, sets a
-	// syslinux one-shot for the next boot, persists pending state, and
+	// inactive A/B slot, copies the kernel + initramfs into /boot, flips
+	// GRUB's `set default=` to the new slot, persists pending state, and
 	// schedules a reboot. The capsule comes back in TENTATIVE mode and
 	// waits for UpdateConfirm — if that doesn't arrive before the deadline,
-	// it auto-reboots and the bootloader's DEFAULT picks the prior slot.
+	// capsuled rolls `set default=` back and reboots into the prior slot.
 	UpdateOS(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UpdateOSRequest, UpdateOSResponse], error)
 	// UpdateConfirm commits a tentative slot. Operator runs this after
-	// they've verified the new slot is healthy. Rewrites the syslinux DEFAULT
-	// and clears pending state.
+	// they've verified the new slot is healthy. Persists the GRUB default
+	// selection and clears pending state.
 	UpdateConfirm(ctx context.Context, in *UpdateConfirmRequest, opts ...grpc.CallOption) (*UpdateConfirmResponse, error)
 }
 
@@ -129,15 +129,15 @@ type CapsuleServiceServer interface {
 	// UpdateOS streams a new OS update bundle from the operator to the
 	// capsule. The first message is metadata (size + sha256); subsequent
 	// messages carry chunked bytes. Capsuled writes the new rootfs to the
-	// inactive A/B slot, copies the kernel + initramfs into /boot, sets a
-	// syslinux one-shot for the next boot, persists pending state, and
+	// inactive A/B slot, copies the kernel + initramfs into /boot, flips
+	// GRUB's `set default=` to the new slot, persists pending state, and
 	// schedules a reboot. The capsule comes back in TENTATIVE mode and
 	// waits for UpdateConfirm — if that doesn't arrive before the deadline,
-	// it auto-reboots and the bootloader's DEFAULT picks the prior slot.
+	// capsuled rolls `set default=` back and reboots into the prior slot.
 	UpdateOS(grpc.ClientStreamingServer[UpdateOSRequest, UpdateOSResponse]) error
 	// UpdateConfirm commits a tentative slot. Operator runs this after
-	// they've verified the new slot is healthy. Rewrites the syslinux DEFAULT
-	// and clears pending state.
+	// they've verified the new slot is healthy. Persists the GRUB default
+	// selection and clears pending state.
 	UpdateConfirm(context.Context, *UpdateConfirmRequest) (*UpdateConfirmResponse, error)
 	mustEmbedUnimplementedCapsuleServiceServer()
 }

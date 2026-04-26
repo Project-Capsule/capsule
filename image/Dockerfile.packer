@@ -2,7 +2,7 @@
 # a bootable raw disk image. Pulls the Alpine linux-virt kernel, builds a
 # custom initramfs with squashfs + overlayfs + virtio support, and lays the
 # partitions out using mtools + dd (no loop devices needed).
-FROM --platform=linux/amd64 alpine:3.20
+FROM --platform=linux/amd64 alpine:3.23
 
 RUN apk add --no-cache \
       bash \
@@ -12,7 +12,8 @@ RUN apk add --no-cache \
       e2fsprogs \
       e2fsprogs-extra \
       sfdisk \
-      syslinux \
+      grub \
+      grub-efi \
       cpio \
       gzip \
       zstd \
@@ -35,11 +36,11 @@ RUN apk add --no-cache \
 # linux-lts is pinned to a known version so update bundles are
 # deterministic. To bump: change the version, rebuild, smoke-test on the
 # VPS via `capsulectl capsule update push build/update.tar`.
-ARG LINUX_LTS_VERSION=6.6.134-r0
+ARG LINUX_LTS_VERSION=6.18.24-r0
 RUN apk --no-cache --initdb --root /tmp/kroot \
       --keys-dir /etc/apk/keys \
-      --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/main \
-      --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
+      --repository=https://dl-cdn.alpinelinux.org/alpine/v3.23/main \
+      --repository=https://dl-cdn.alpinelinux.org/alpine/v3.23/community \
       add alpine-base "linux-lts=${LINUX_LTS_VERSION}" busybox-static \
  && mkdir -p /bootfiles \
  && cp /tmp/kroot/boot/vmlinuz-lts /bootfiles/vmlinuz
@@ -66,11 +67,40 @@ RUN set -eux \
       ln -sf busybox "$ROOT/bin/$applet"; \
     done \
  && ln -sf ../bin/busybox "$ROOT/sbin/switch_root" \
- # Copy the whole module tree — simpler than surgically picking modules, and
- # the kernel discards the initramfs pages after switch_root anyway.
- && cp -a /tmp/kroot/lib/modules/$KVER "$ROOT"/lib/modules/$KVER \
- # Decompress any compressed modules so busybox insmod can load them.
- # Alpine 3.20 uses zstd; handle the older gz/xz variants too for robustness.
+ # Copy ONLY the modules our /init insmods. The full tree decompresses to
+ # ~370 MiB, blowing initramfs to ~80 MiB compressed — large enough that some
+ # consumer UEFI firmwares fail to allocate the buffer for it. Alpine 3.20
+ # used zstd; the gz/xz handling stays for robustness across kernel versions.
+ && SRC=/tmp/kroot/lib/modules/$KVER/kernel \
+ && DST="$ROOT/lib/modules/$KVER/kernel" \
+ && for m in drivers/virtio/virtio_ring \
+             drivers/virtio/virtio \
+             drivers/virtio/virtio_pci_legacy_dev \
+             drivers/virtio/virtio_pci_modern_dev \
+             drivers/virtio/virtio_pci \
+             drivers/block/virtio_blk \
+             drivers/hwmon/hwmon \
+             drivers/nvme/host/nvme-core \
+             drivers/nvme/host/nvme \
+             drivers/usb/common/usb-common \
+             drivers/usb/core/usbcore \
+             drivers/usb/host/xhci-hcd \
+             drivers/usb/host/xhci-pci \
+             drivers/scsi/scsi_common \
+             drivers/scsi/scsi_mod \
+             drivers/scsi/sd_mod \
+             drivers/usb/storage/usb-storage \
+             drivers/usb/storage/uas \
+             fs/squashfs/squashfs \
+             fs/overlayfs/overlay; do \
+      for ext in ko.zst ko.gz ko.xz ko; do \
+        if [ -f "$SRC/$m.$ext" ]; then \
+          mkdir -p "$DST/$(dirname $m)"; \
+          cp "$SRC/$m.$ext" "$DST/$m.$ext"; \
+          break; \
+        fi; \
+      done; \
+    done \
  && find "$ROOT"/lib/modules -name "*.ko.zst" -exec zstd -d --rm -q {} \; \
  && find "$ROOT"/lib/modules -name "*.ko.gz"  -exec gunzip {} \; \
  && find "$ROOT"/lib/modules -name "*.ko.xz"  -exec xz -d --quiet {} \; \

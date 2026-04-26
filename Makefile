@@ -40,12 +40,21 @@ update-bundle:
 	@test -f $(UPDATE_BUNDLE) || (echo "missing $(UPDATE_BUNDLE)"; exit 1)
 	@ls -lh $(UPDATE_BUNDLE)
 
-# Phase 0 QEMU boot: BIOS (SeaBIOS default), virtio disk + net, serial console on
-# host stdio. KVM on Linux hosts accelerates; on macOS this falls back to TCG
-# (software) — slow but sufficient for smoke tests.
-qemu: $(DISK_IMAGE)
+# UEFI QEMU boot via OVMF/edk2 firmware (pflash). brew ships the x86_64 code
+# blob and a shared i386 vars blob (compatible with x86_64 firmware). Override
+# these paths if your firmware lives elsewhere.
+OVMF_CODE ?= /opt/homebrew/share/qemu/edk2-x86_64-code.fd
+OVMF_VARS ?= /opt/homebrew/share/qemu/edk2-i386-vars.fd
+EFI_VARS  := $(BUILD_DIR)/efi-vars.fd
+
+$(EFI_VARS): $(OVMF_VARS)
+	cp $(OVMF_VARS) $(EFI_VARS)
+
+qemu: $(DISK_IMAGE) $(EFI_VARS)
 	qemu-system-x86_64 \
 	  -m 2G -smp 2 \
+	  -drive if=pflash,format=raw,unit=0,readonly=on,file=$(OVMF_CODE) \
+	  -drive if=pflash,format=raw,unit=1,file=$(EFI_VARS) \
 	  -drive if=virtio,format=raw,file=$(DISK_IMAGE) \
 	  -netdev user,id=n0,hostfwd=tcp::50000-:50000 \
 	  -device virtio-net-pci,netdev=n0 \

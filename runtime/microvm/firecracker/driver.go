@@ -536,11 +536,11 @@ func ensureMasquerade(bridge string) error {
 	args := []string{"-t", "nat", "-s", src, "!", "-o", bridge, "-j", "MASQUERADE"}
 	// -C (check) exits 0 if present, non-zero otherwise.
 	checkArgs := append([]string{"-t", "nat", "-C", "POSTROUTING"}, args[2:]...)
-	if err := exec.Command("/sbin/iptables", checkArgs...).Run(); err == nil {
+	if err := exec.Command("/usr/sbin/iptables", checkArgs...).Run(); err == nil {
 		return nil
 	}
 	appendArgs := append([]string{"-t", "nat", "-A", "POSTROUTING"}, args[2:]...)
-	out, err := exec.Command("/sbin/iptables", appendArgs...).CombinedOutput()
+	out, err := exec.Command("/usr/sbin/iptables", appendArgs...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("iptables masquerade: %w: %s", err, strings.TrimSpace(string(out)))
 	}

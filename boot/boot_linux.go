@@ -119,8 +119,15 @@ func loadBridgeModules() {
 	// kvm/kvm_intel/kvm_amd are needed for MicroVM workloads via
 	// Firecracker. On non-virt hosts they'll fail to load — that's fine,
 	// only MicroVM workloads will fail later.
+	// NIC drivers: try every common consumer-mini-PC chip. Modprobe is a
+	// no-op for drivers whose hardware isn't present, so a shotgun load is
+	// fine and keeps the same image bootable on Beelink (Intel I225/I226
+	// or Realtek 8125 typically) and on QEMU (virtio_net) without a
+	// host-specific build.
 	for _, m := range []string{
 		"virtio_net", "virtio_rng",
+		"igc", "e1000e", "e1000", "igb", // Intel
+		"r8169", "r8125",                // Realtek
 		"bridge", "br_netfilter", "veth", "nf_nat",
 		"kvm", "kvm_intel", "kvm_amd",
 		"tun",
@@ -228,7 +235,7 @@ func findPermPartition() (string, error) {
 // Used by:
 //   - mountPerm (partition 4 = LVM PV)
 //   - core/update for the inactive slot's block device (2 or 3)
-//   - core/update for KEELBOOT (1)
+//   - core/update for CAPSULEBOOT (1) — ESP
 func FindPartitionByNumber(partNum int) (string, error) {
 	wantSig, err := bootDiskSignature()
 	if err != nil {
@@ -330,7 +337,7 @@ func readMBRDiskSig(devPath string) (string, error) {
 
 // detectActiveSlot parses /proc/cmdline for `capsule.slot=a|b` and returns
 // "slot_a" / "slot_b". Empty string if no marker (dev mode, or pre-A/B
-// build). The marker is set per-syslinux-LABEL by pack.sh.
+// build). The marker is set per-menuentry in grub.cfg by pack.sh.
 func detectActiveSlot() string {
 	data, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
@@ -450,27 +457,80 @@ func isMounted(path string) (bool, error) {
 	return false, nil
 }
 
-// bringUpDefaultEth brings up the first non-loopback interface and assigns
-// it a static address. Phase 0 hardcodes QEMU's SLIRP default (10.0.2.15/24,
-// gateway 10.0.2.2) so we can prove the gRPC path without depending on
-// AF_PACKET / udhcpc, which the Alpine linux-virt kernel doesn't expose
-// out of the box. A real declarative network config lands in a later phase.
+// bringUpDefaultEth brings up the first non-loopback interface and asks
+// busybox udhcpc for a lease. Works on QEMU's SLIRP (DHCP server at
+// 10.0.2.2) and on a real LAN router. Caller logs but does not abort if
+// this fails — gRPC still binds to 0.0.0.0 so anyone who can reach the
+// box (statically configured, console session) can talk to capsuled.
 func bringUpDefaultEth() error {
-	name, err := firstEthIface()
+	name, err := firstEthIfaceWait(15 * time.Second)
 	if err != nil {
 		return err
 	}
 	if err := linkUp(name); err != nil {
 		return fmt.Errorf("link up %s: %w", name, err)
 	}
-	if err := runIP("addr", "add", "10.0.2.15/24", "dev", name); err != nil {
-		return fmt.Errorf("addr add: %w", err)
+	// -i: interface, -q: exit on lease, -n: exit if no lease, -t 4: 4
+	// retries, -A 2: 2-second between retries. Short enough that a missing
+	// DHCP server doesn't stall boot indefinitely.
+	cmd := exec.Command("/sbin/udhcpc", "-i", name, "-q", "-n", "-t", "4", "-A", "2")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		slog.Warn("udhcpc failed", "iface", name, "err", err, "out", strings.TrimSpace(string(out)))
+		return nil
 	}
-	if err := runIP("route", "add", "default", "via", "10.0.2.2", "dev", name); err != nil {
-		return fmt.Errorf("route add default: %w", err)
-	}
-	slog.Info("ethernet configured (static SLIRP defaults)", "iface", name)
+	slog.Info("ethernet configured via DHCP", "iface", name)
+
+	// One-shot NTP sync. Real hardware boots with whatever wall clock the
+	// RTC says (often minutes off, sometimes worse). Without this, server-
+	// stamped log timestamps disagree with operator clocks and the A/B
+	// update deadline can fire much later in real time than it should.
+	go syncTimeOnce()
 	return nil
+}
+
+// syncTimeOnce runs busybox ntpd in -q mode (quit after first sync) against
+// a public NTP pool. Best-effort and non-blocking — capsuled boots fine
+// without it; the only consequence of failure is a wall-clock that drifts
+// from real time. Run on its own goroutine so DHCP→bring-up doesn't wait.
+func syncTimeOnce() {
+	cmd := exec.Command("/usr/sbin/ntpd",
+		"-d", "-n", "-q",
+		"-p", "pool.ntp.org",
+		"-p", "time.cloudflare.com",
+		"-p", "time.google.com",
+	)
+	// Hard 30-sec timeout: ntpd can hang if all peers are unreachable.
+	timer := time.AfterFunc(30*time.Second, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	defer timer.Stop()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		slog.Warn("ntpd sync failed", "err", err, "out", strings.TrimSpace(string(out)))
+		return
+	}
+	slog.Info("clock synced via ntpd", "now", time.Now().UTC().Format(time.RFC3339))
+}
+
+// firstEthIfaceWait polls /sys/class/net for a non-loopback interface,
+// waiting up to timeout for one to appear. PCI probe of NIC drivers
+// (r8169, igc, etc.) is async — modprobe returns before the netdev is
+// created, so a one-shot check often misses it.
+func firstEthIfaceWait(timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		name, err := firstEthIface()
+		if err == nil {
+			return name, nil
+		}
+		if time.Now().After(deadline) {
+			return "", err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // setHostnameFromFile reads a single line from path and calls sethostname(2).
@@ -506,15 +566,6 @@ func installResolvConf(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, data, 0o644)
-}
-
-func runIP(args ...string) error {
-	cmd := exec.Command("/sbin/ip", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, string(out))
-	}
-	return nil
 }
 
 // firstEthIface returns the name of the first non-loopback network interface

@@ -111,6 +111,7 @@ func (c *CapsuleController) GetInfo(ctx context.Context, _ *capsulev1.GetInfoReq
 		DiskTotalBytes:       diskTotal,
 		ThinpoolTotalBytes:   poolTotal,
 		ThinpoolUsedBytes:    poolUsed,
+		LocalTimeUnix:        time.Now().Unix(),
 	}
 	if c.OSStateStore != nil {
 		st, err := c.OSStateStore.Get(ctx)

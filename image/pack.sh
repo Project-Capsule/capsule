@@ -14,14 +14,14 @@
 #   /work/disk.raw      Bootable raw disk image (4 partitions, MBR).
 #
 # Partition layout (Phase 3 — A/B):
-#   1. FAT32     KEELBOOT   256 MiB        kernels + initramfs (per slot) + syslinux
-#   2. raw       SLOT_A     SLOT_SIZE_MIB  squashfs (active rootfs by default)
-#   3. raw       SLOT_B     SLOT_SIZE_MIB  squashfs (seeded identical to A on first build)
-#   4. type 8e   PERM       PERM_SIZE_MIB  LVM PV (capsule VG: meta LV + thinpool)
+#   1. FAT32     CAPSULEBOOT  256 MiB        kernels + initramfs (per slot) + grubx64.efi
+#   2. raw       SLOT_A       SLOT_SIZE_MIB  squashfs (active rootfs by default)
+#   3. raw       SLOT_B       SLOT_SIZE_MIB  squashfs (seeded identical to A on first build)
+#   4. type 8e   PERM         PERM_SIZE_MIB  LVM PV (capsule VG: meta LV + thinpool)
 #
-# MBR disk-id is fixed at 0xCAFE0001 so PARTUUIDs are stable across rebuilds.
-# Kernel cmdline references the slot by PARTUUID, not /dev path, so Beelink
-# NVMe and QEMU virtio both resolve cleanly via /dev/disk/by-partuuid/.
+# MBR disk-id is fixed at 0xb1a570ff (BLASTOFF) so PARTUUIDs are stable across
+# rebuilds. Kernel cmdline references the slot by PARTUUID, not /dev path, so
+# Beelink NVMe and QEMU virtio both resolve cleanly via /dev/disk/by-partuuid/.
 #
 # Slot identity is communicated to capsuled via `capsule.slot=a|b` on the
 # kernel cmdline (parsed by detectActiveSlot in boot/boot_linux.go).
@@ -37,7 +37,7 @@ PERM_IMG="$WORK/perm.ext4"
 UPDATE_TAR="$WORK/update.tar"
 
 PERM_SIZE_MIB="${PERM_SIZE_MIB:-2048}"
-DISK_SIG_HEX="cafe0001"
+DISK_SIG_HEX="b1a570ff"
 
 [ -f "$ROOTFS_TAR" ] || { echo "pack.sh: missing $ROOTFS_TAR"; exit 1; }
 
@@ -55,7 +55,7 @@ echo "pack.sh: squashfs size = ${SQSH_BYTES} bytes"
 # update.tar contains everything an OS update push needs: VERSION (a single
 # build identifier line), the kernel + initramfs, and the squashfs rootfs.
 # Capsuled (in a future commit) will receive this stream, dd the squashfs
-# to the inactive slot, and write per-slot kernels into KEELBOOT.
+# to the inactive slot, and write per-slot kernels into CAPSULEBOOT.
 VERSION="${CAPSULE_VERSION:-$(date +%Y%m%d-%H%M%S)}"
 mkdir -p /tmp/bundle
 echo "$VERSION"             > /tmp/bundle/VERSION
@@ -114,12 +114,20 @@ if [ ! -f "$PERM_IMG" ]; then
   truncate -s "$PERM_BYTES" "$PERM_IMG"
 fi
 
-# ---- 5. per-slot kernels + dual-label syslinux.cfg in /boot ---------------
+# ---- 5. per-slot kernels + GRUB EFI in /boot ------------------------------
+# CAPSULEBOOT is an EFI System Partition (FAT32, MBR type 0xEF). UEFI firmware
+# boots /EFI/BOOT/BOOTX64.EFI by fallback — no NVRAM entry needed, so the
+# image works on any machine without efibootmgr setup.
+#
+# We use GRUB EFI rather than syslinux-efi: Alpine's syslinux-efi handoff to
+# the kernel hangs on some consumer firmwares (Beelink N150 confirmed) before
+# the framebuffer console initializes. GRUB is more battle-tested across
+# consumer UEFI implementations.
 BOOT_SIZE_MIB=256
 BOOT_BYTES=$(( BOOT_SIZE_MIB * 1024 * 1024 ))
 rm -f "$BOOT_IMG"
 truncate -s "$BOOT_BYTES" "$BOOT_IMG"
-mkfs.fat -F 32 -n KEELBOOT "$BOOT_IMG" >/dev/null
+mkfs.fat -F 32 -n CAPSULEBOOT "$BOOT_IMG" >/dev/null
 
 # Both slots get the same kernel + initramfs at first build. Updates rewrite
 # only the inactive slot's pair (skip-if-unchanged compares hashes first).
@@ -127,36 +135,44 @@ mcopy -i "$BOOT_IMG" /bootfiles/vmlinuz   ::/vmlinuz_a
 mcopy -i "$BOOT_IMG" /bootfiles/initramfs ::/initramfs_a
 mcopy -i "$BOOT_IMG" /bootfiles/vmlinuz   ::/vmlinuz_b
 mcopy -i "$BOOT_IMG" /bootfiles/initramfs ::/initramfs_b
-mmd    -i "$BOOT_IMG" ::/syslinux || true
-mcopy -i "$BOOT_IMG" /usr/share/syslinux/ldlinux.c32  ::/syslinux/ldlinux.c32
-mcopy -i "$BOOT_IMG" /usr/share/syslinux/libcom32.c32 ::/syslinux/libcom32.c32
-mcopy -i "$BOOT_IMG" /usr/share/syslinux/libutil.c32  ::/syslinux/libutil.c32
-mcopy -i "$BOOT_IMG" /usr/share/syslinux/menu.c32     ::/syslinux/menu.c32
 
-# Two LABELs: slot_a and slot_b. DEFAULT is slot_a; the OS update path uses
-# `syslinux --once=slot_b` to flip a one-shot for the next reboot.
-# `panic=10` auto-reboots on kernel panic so a bad kernel rolls back to the
-# committed slot via the bootloader's DEFAULT.
-cat >/tmp/syslinux.cfg <<EOF
-DEFAULT slot_a
-TIMEOUT 20
-PROMPT 0
-
-LABEL slot_a
-  MENU LABEL Capsule (SLOT_A)
-  KERNEL /vmlinuz_a
-  INITRD /initramfs_a
-  APPEND root=PARTUUID=${DISK_SIG_HEX}-02 rootfstype=squashfs ro random.trust_cpu=on capsule.slot=a console=ttyS0,115200n8 panic=10
-
-LABEL slot_b
-  MENU LABEL Capsule (SLOT_B)
-  KERNEL /vmlinuz_b
-  INITRD /initramfs_b
-  APPEND root=PARTUUID=${DISK_SIG_HEX}-03 rootfstype=squashfs ro random.trust_cpu=on capsule.slot=b console=ttyS0,115200n8 panic=10
+# Build a standalone grubx64.efi: a single self-contained EFI binary with a
+# tiny embedded grub.cfg that searches for our ESP by FAT label and chains to
+# the external /EFI/BOOT/grub.cfg. The external cfg has the actual menu —
+# capsuled rewrites it at update-time to flip slots.
+mkdir -p /tmp/grub-stage
+cat >/tmp/grub-stage/embedded.cfg <<EOF
+search --no-floppy --label CAPSULEBOOT --set=root
+configfile /EFI/BOOT/grub.cfg
 EOF
-mcopy -i "$BOOT_IMG" /tmp/syslinux.cfg ::/syslinux/syslinux.cfg
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output=/tmp/grub-stage/grubx64.efi \
+    --modules="part_msdos fat normal linux configfile all_video efi_gop efi_uga search search_label echo" \
+    "boot/grub/grub.cfg=/tmp/grub-stage/embedded.cfg"
 
-syslinux --install "$BOOT_IMG"
+# DEFAULT is 0 (slot_a). Updates flip it to 1 (slot_b) by rewriting the
+# `set default=` line. `panic=10` auto-reboots on kernel panic so a bad
+# kernel rolls back to the committed slot via the bootloader's default.
+cat >/tmp/grub-stage/grub.cfg <<EOF
+set timeout=2
+set default=0
+
+menuentry "Capsule (slot_a)" {
+    linux /vmlinuz_a root=PARTUUID=${DISK_SIG_HEX}-02 rootfstype=squashfs ro random.trust_cpu=on capsule.slot=a console=tty0 console=ttyS0,115200n8 panic=10
+    initrd /initramfs_a
+}
+
+menuentry "Capsule (slot_b)" {
+    linux /vmlinuz_b root=PARTUUID=${DISK_SIG_HEX}-03 rootfstype=squashfs ro random.trust_cpu=on capsule.slot=b console=tty0 console=ttyS0,115200n8 panic=10
+    initrd /initramfs_b
+}
+EOF
+
+mmd    -i "$BOOT_IMG" ::/EFI               || true
+mmd    -i "$BOOT_IMG" ::/EFI/BOOT          || true
+mcopy -i "$BOOT_IMG" /tmp/grub-stage/grubx64.efi ::/EFI/BOOT/BOOTX64.EFI
+mcopy -i "$BOOT_IMG" /tmp/grub-stage/grub.cfg    ::/EFI/BOOT/grub.cfg
 
 # ---- 6. build the raw disk with MBR + 4 partitions + stable disk-id -------
 BOOT_START=2048
@@ -178,7 +194,7 @@ sfdisk "$DISK" <<EOF
 label: dos
 label-id: 0x${DISK_SIG_HEX}
 unit: sectors
-${DISK}1 : start=$BOOT_START,   size=$BOOT_SECTORS,   type=c,  bootable
+${DISK}1 : start=$BOOT_START,   size=$BOOT_SECTORS,   type=ef, bootable
 ${DISK}2 : start=$SLOT_A_START, size=$SLOT_A_SECTORS, type=83
 ${DISK}3 : start=$SLOT_B_START, size=$SLOT_B_SECTORS, type=83
 ${DISK}4 : start=$PERM_START,   size=$PERM_SECTORS,   type=8e
@@ -192,6 +208,7 @@ dd if="$SQSH"     of="$DISK" bs=512 seek="$SLOT_A_START"                       c
 dd if="$SQSH"     of="$DISK" bs=512 seek="$SLOT_B_START"                       conv=notrunc status=none
 dd if="$PERM_IMG" of="$DISK" bs=512 seek="$PERM_START"   count="$PERM_SECTORS" conv=notrunc status=none
 
-dd if=/usr/share/syslinux/mbr.bin of="$DISK" bs=440 count=1 conv=notrunc status=none
+# UEFI-only — no MBR boot code. Firmware boots /EFI/BOOT/BOOTX64.EFI from
+# partition 1 (type 0xEF) directly.
 
 echo "pack.sh: wrote $DISK ($TOTAL_MIB MiB) — slot_a + slot_b seeded identically"

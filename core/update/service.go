@@ -9,7 +9,7 @@
 //	/perm/updates/incoming.tar             // streamed bundle, sha256-verified
 //	/perm/updates/staging/{VERSION,vmlinuz,initramfs,rootfs.sqsh}
 //
-// All shell-outs (mount, syslinux, dd) are gated by boot.ExecMu so they
+// All shell-outs (mount, dd, etc.) are gated by boot.ExecMu so they
 // don't race the PID-1 reaper.
 package update
 
@@ -299,15 +299,13 @@ func (s *Service) ReceiveBundle(ctx context.Context, expectSize uint64, expectSH
 	}
 
 	// Mount /boot rw, copy per-slot kernel + initramfs (skip-if-unchanged),
-	// then flip the syslinux DEFAULT to the new slot. We'd ideally use
-	// `syslinux --once=<slot>` for a true one-shot (so a kernel panic falls
-	// back automatically), but Alpine 3.20's syslinux installer rejects
-	// `--once` on FAT32 as "not yet implemented". Without a true one-shot,
-	// the next boot DEFAULT controls which slot loads — so on tentative boot
-	// the deadline timer + UpdateConfirm dance handles "kernel boots,
-	// userland sad" rollback. Kernel panic during tentative boot will
-	// loop on the new slot until manual recovery via serial console.
-	bootPart, err := boot.FindPartitionByNumber(1) // KEELBOOT
+	// then flip GRUB's `set default=` to the new slot. There's no true
+	// one-shot equivalent in our GRUB setup, so the next boot's `default`
+	// controls which slot loads — on tentative boot the deadline timer +
+	// UpdateConfirm dance handles "kernel boots, userland sad" rollback.
+	// Kernel panic during tentative boot will loop on the new slot until
+	// manual recovery via the GRUB menu.
+	bootPart, err := boot.FindPartitionByNumber(1) // CAPSULEBOOT (ESP)
 	if err != nil {
 		return "", "", fmt.Errorf("find boot partition: %w", err)
 	}
@@ -319,7 +317,7 @@ func (s *Service) ReceiveBundle(ctx context.Context, expectSize uint64, expectSH
 		if err := copyIfChanged(bundle.initramfsPath, dst("initramfs_"+slotLetter(nextSlot))); err != nil {
 			return err
 		}
-		return rewriteSyslinuxDefault(filepath.Join(s.BootMount, "syslinux", "syslinux.cfg"), nextSlot)
+		return rewriteGrubDefault(filepath.Join(s.BootMount, "EFI", "BOOT", "grub.cfg"), nextSlot)
 	}); err != nil {
 		return "", "", err
 	}
@@ -394,7 +392,7 @@ func (s *Service) Confirm(ctx context.Context) (committedSlot, committedVersion 
 	return committedSlot, committedVersion, nil
 }
 
-// rollbackToLastGood rewrites the syslinux DEFAULT back to the
+// rollbackToLastGood rewrites GRUB's `set default=` back to the
 // last-known-good slot before triggering a reboot. Used by the deadline
 // goroutine when the operator hasn't confirmed in time.
 func (s *Service) rollbackToLastGood(ctx context.Context, lastGood string) error {
@@ -403,7 +401,7 @@ func (s *Service) rollbackToLastGood(ctx context.Context, lastGood string) error
 		return fmt.Errorf("find boot partition: %w", err)
 	}
 	return s.withBootMount(bootPart, func() error {
-		return rewriteSyslinuxDefault(filepath.Join(s.BootMount, "syslinux", "syslinux.cfg"), lastGood)
+		return rewriteGrubDefault(filepath.Join(s.BootMount, "EFI", "BOOT", "grub.cfg"), lastGood)
 	})
 }
 
@@ -443,28 +441,43 @@ func (s *Service) withBootMount(devPath string, fn func() error) error {
 	return fn()
 }
 
-// rewriteSyslinuxDefault replaces the `DEFAULT <slot>` line in
-// syslinux.cfg with the given slot. We author the file in pack.sh; the
-// format is stable so a string replace is safe.
-func rewriteSyslinuxDefault(path, slot string) error {
+// rewriteGrubDefault replaces the `set default=N` line in grub.cfg so the
+// next reboot picks the requested slot. We author the file in pack.sh in a
+// fixed two-entry order (slot_a=0, slot_b=1) so a string replace is safe.
+func rewriteGrubDefault(path, slot string) error {
+	idx, err := slotIndex(slot)
+	if err != nil {
+		return err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read syslinux.cfg: %w", err)
+		return fmt.Errorf("read grub.cfg: %w", err)
 	}
 	lines := strings.Split(string(data), "\n")
 	found := false
 	for i, ln := range lines {
 		trimmed := strings.TrimSpace(ln)
-		if strings.HasPrefix(strings.ToUpper(trimmed), "DEFAULT ") {
-			lines[i] = "DEFAULT " + slot
+		if strings.HasPrefix(trimmed, "set default=") {
+			lines[i] = fmt.Sprintf("set default=%d", idx)
 			found = true
 			break
 		}
 	}
 	if !found {
-		return fmt.Errorf("no DEFAULT line in %s", path)
+		return fmt.Errorf("no `set default=` line in %s", path)
 	}
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+func slotIndex(slot string) (int, error) {
+	switch slot {
+	case "slot_a":
+		return 0, nil
+	case "slot_b":
+		return 1, nil
+	default:
+		return -1, fmt.Errorf("unknown slot %q", slot)
+	}
 }
 
 func copyIfChanged(src, dst string) error {

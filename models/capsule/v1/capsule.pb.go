@@ -103,8 +103,12 @@ type GetInfoResponse struct {
 	// LVM thin-pool data currently allocated. Capsule fills up when this
 	// approaches thinpool_total_bytes.
 	ThinpoolUsedBytes uint64 `protobuf:"varint,18,opt,name=thinpool_used_bytes,json=thinpoolUsedBytes,proto3" json:"thinpool_used_bytes,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Capsule's current wall-clock time as Unix seconds. Lets capsulectl
+	// surface clock skew between operator and capsule — drift breaks A/B
+	// deadline-passed messages, log correlation, etc.
+	LocalTimeUnix int64 `protobuf:"varint,19,opt,name=local_time_unix,json=localTimeUnix,proto3" json:"local_time_unix,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetInfoResponse) Reset() {
@@ -259,6 +263,13 @@ func (x *GetInfoResponse) GetThinpoolTotalBytes() uint64 {
 func (x *GetInfoResponse) GetThinpoolUsedBytes() uint64 {
 	if x != nil {
 		return x.ThinpoolUsedBytes
+	}
+	return 0
+}
+
+func (x *GetInfoResponse) GetLocalTimeUnix() int64 {
+	if x != nil {
+		return x.LocalTimeUnix
 	}
 	return 0
 }
@@ -658,7 +669,7 @@ const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\n" +
 	"\x18capsule/v1/capsule.proto\x12\n" +
 	"capsule.v1\"\x10\n" +
-	"\x0eGetInfoRequest\"\xd1\x05\n" +
+	"\x0eGetInfoRequest\"\xf9\x05\n" +
 	"\x0fGetInfoResponse\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12%\n" +
 	"\x0ekernel_release\x18\x02 \x01(\tR\rkernelRelease\x12%\n" +
@@ -679,7 +690,8 @@ const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\tboot_disk\x18\x0f \x01(\tR\bbootDisk\x12(\n" +
 	"\x10disk_total_bytes\x18\x10 \x01(\x04R\x0ediskTotalBytes\x120\n" +
 	"\x14thinpool_total_bytes\x18\x11 \x01(\x04R\x12thinpoolTotalBytes\x12.\n" +
-	"\x13thinpool_used_bytes\x18\x12 \x01(\x04R\x11thinpoolUsedBytes\"K\n" +
+	"\x13thinpool_used_bytes\x18\x12 \x01(\x04R\x11thinpoolUsedBytes\x12&\n" +
+	"\x0flocal_time_unix\x18\x13 \x01(\x03R\rlocalTimeUnix\"K\n" +
 	"\x12CapsuleLogsRequest\x12\x16\n" +
 	"\x06follow\x18\x01 \x01(\bR\x06follow\x12\x1d\n" +
 	"\n" +

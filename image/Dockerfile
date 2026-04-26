@@ -15,7 +15,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
       -o /out/capsule-guest ./cmd/capsule-guest
 
 # Stage 2: assemble the Capsule rootfs. Alpine provides userland; capsuled is /sbin/init.
-FROM alpine:3.20 AS rootfs
+FROM alpine:3.23 AS rootfs
 RUN apk add --no-cache \
       iproute2 \
       iptables \
@@ -39,11 +39,7 @@ RUN apk add --no-cache \
       # snapshots share a thin pool in the same VG. Without these the boot
       # path can't activate the VG and volume ops fail.
       lvm2 lvm2-dmeventd device-mapper \
-      thin-provisioning-tools \
-      # syslinux for runtime `syslinux --once=<slot> <bootdev>` calls during
-      # OS update push. Adds ~1 MiB but lets capsuled flip the bootloader's
-      # one-shot LABEL without bringing in a separate tool.
-      syslinux
+      thin-provisioning-tools
 # Alpine ships CNI plugins at /usr/libexec/cni; CNI's default lookup is
 # /opt/cni/bin. Symlink so standard tooling (go-cni) finds them.
 RUN mkdir -p /opt/cni && ln -sf /usr/libexec/cni /opt/cni/bin
@@ -119,7 +115,7 @@ RUN chmod 0755 /sbin/init /usr/share/capsule/capsule-guest
 #     boot, but these have to already be there when the kernel exec's init.
 # The user's OCI payload is attached separately as /dev/vdb and mounted
 # by capsule-guest on demand.
-FROM alpine:3.20 AS vmroot
+FROM alpine:3.23 AS vmroot
 RUN rm -rf /var/cache/apk /usr/share/doc /usr/share/man /usr/share/locale \
            /usr/share/info /etc/ssh /etc/init.d /etc/runlevels /etc/conf.d \
            /etc/network /etc/crontabs /media /mnt

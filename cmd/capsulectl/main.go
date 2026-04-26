@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,8 +28,13 @@ import (
 
 func main() {
 	// Global flags first: --capsule host:port. Then subcommand and its args.
+	// CAPSULE_HOST env var sets the default so daily use doesn't repeat it.
 	global := flag.NewFlagSet("capsulectl", flag.ExitOnError)
-	addr := global.String("capsule", "localhost:50000", "capsule gRPC address")
+	defaultAddr := os.Getenv("CAPSULE_HOST")
+	if defaultAddr == "" {
+		defaultAddr = "localhost:50000"
+	}
+	addr := global.String("capsule", defaultAddr, "capsule gRPC address (overrides $CAPSULE_HOST)")
 	if err := global.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -69,15 +75,14 @@ func main() {
 		tail := fs.Int("n", 0, "show the last N lines before streaming")
 		_ = fs.Parse(subArgs)
 		err = capsuleLogs(*addr, *follow, *tail)
-	case "workload apply":
-		fs := flag.NewFlagSet("workload apply", flag.ExitOnError)
-		file := fs.String("f", "", "workload manifest file (- for stdin)")
-		_ = fs.Parse(subArgs)
-		if *file == "" {
-			err = errors.New("workload apply requires -f <file>")
+	case "apply -f":
+		// kubectl-style: dispatches by `kind:` so a single command applies
+		// either workloads (Container/MicroVM) or Volumes from one manifest.
+		if len(subArgs) < 1 {
+			err = errors.New("apply -f requires a manifest path")
 			break
 		}
-		err = workloadApply(*addr, *file)
+		err = applyManifest(*addr, subArgs[0])
 	case "workload list":
 		err = workloadList(*addr)
 	case "workload get":
@@ -211,13 +216,15 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `capsulectl — capsule control CLI
 
+Set CAPSULE_HOST in your environment to skip --capsule.
+
 Usage:
+  capsulectl [--capsule host:port] apply -f <manifest.yaml>     # any kind: Container/MicroVM/Volume
   capsulectl [--capsule host:port] capsule info
   capsulectl [--capsule host:port] capsule logs [-f] [-n N]
   capsulectl [--capsule host:port] capsule update push <bundle.tar> [--auto-confirm=N]
   capsulectl [--capsule host:port] capsule update confirm
   capsulectl [--capsule host:port] capsule debug [-i <image>] [--keep] [-- <cmd> [args...]]
-  capsulectl [--capsule host:port] workload apply -f <manifest.yaml>
   capsulectl [--capsule host:port] workload list
   capsulectl [--capsule host:port] workload get <name>
   capsulectl [--capsule host:port] workload delete <name>
@@ -311,8 +318,32 @@ func capsuleInfo(addr string) error {
 		if resp.LastVersion != "" {
 			fmt.Printf("  last_version:    %s\n", resp.LastVersion)
 		}
+		if resp.LocalTimeUnix > 0 {
+			capsuleNow := time.Unix(resp.LocalTimeUnix, 0).UTC()
+			skew := time.Since(capsuleNow).Round(time.Second)
+			skewStr := ""
+			if abs := skew; abs < 0 {
+				abs = -abs
+				if abs > 5*time.Second {
+					skewStr = fmt.Sprintf(" (skew: capsule is %s ahead)", abs)
+				}
+			} else if skew > 5*time.Second {
+				skewStr = fmt.Sprintf(" (skew: capsule is %s behind)", skew)
+			}
+			fmt.Printf("  local_time:      %s%s\n", capsuleNow.Format(time.RFC3339), skewStr)
+		}
 		if resp.PendingSlot != "" {
-			until := time.Until(time.Unix(resp.PendingDeadlineUnix, 0)).Round(time.Second)
+			// Compute time-to-deadline in the *capsule's* clock frame so the
+			// message stays meaningful even when the operator's laptop clock
+			// drifts from the capsule's. Falls back to laptop frame if the
+			// capsule didn't return its current time.
+			var until time.Duration
+			if resp.LocalTimeUnix > 0 {
+				until = time.Duration(resp.PendingDeadlineUnix-resp.LocalTimeUnix) * time.Second
+			} else {
+				until = time.Until(time.Unix(resp.PendingDeadlineUnix, 0))
+			}
+			until = until.Round(time.Second)
 			marker := "auto-rollback in " + until.String()
 			if until <= 0 {
 				marker = "deadline passed"
@@ -641,16 +672,79 @@ func sha256File(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// --- workload apply --------------------------------------------------------
+// --- unified apply ---------------------------------------------------------
 
-func workloadApply(addr, path string) error {
+// applyManifest reads a YAML/JSON manifest, peeks the `kind:` field, and
+// dispatches to the matching service. Supports the same kinds the rest of
+// the CLI does: `Container` / `MicroVM` (workloads) and `Volume`.
+func applyManifest(addr, path string) error {
 	raw, err := readManifest(path)
 	if err != nil {
 		return err
 	}
-	w, err := parseWorkload(raw)
+	kind, err := manifestKind(raw)
 	if err != nil {
 		return err
+	}
+	switch kind {
+	case "Volume":
+		return volumeApplyRaw(addr, raw)
+	case "Container", "MicroVM", "WORKLOAD_KIND_CONTAINER", "WORKLOAD_KIND_MICRO_VM":
+		return workloadApplyRaw(addr, raw)
+	default:
+		return fmt.Errorf("unsupported kind %q (expected Container, MicroVM, or Volume)", kind)
+	}
+}
+
+// manifestKind extracts the `kind:` value from a YAML or JSON manifest
+// without parsing the rest of the document — we only need enough to
+// route. Tolerates whitespace/quotes around the value.
+func manifestKind(raw []byte) (string, error) {
+	j, err := sigsyaml.YAMLToJSON(raw)
+	if err != nil {
+		return "", fmt.Errorf("parse manifest: %w", err)
+	}
+	var stub struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(j, &stub); err != nil {
+		return "", fmt.Errorf("parse kind: %w", err)
+	}
+	if stub.Kind == "" {
+		return "", errors.New("manifest missing required `kind:` field")
+	}
+	return stub.Kind, nil
+}
+
+// volumeApplyRaw is idempotent: creates if missing, resizes if size grew,
+// no-op if already matching. Mirrors workloadApply semantics. Volume YAML
+// schema:
+//
+//	kind: Volume
+//	name: shared
+//	size: 2GiB    # optional; bare int = MiB
+func volumeApplyRaw(addr string, raw []byte) error {
+	var m struct {
+		Kind string `json:"kind"`
+		Name string `json:"name"`
+		Size string `json:"size"`
+	}
+	j, err := sigsyaml.YAMLToJSON(raw)
+	if err != nil {
+		return fmt.Errorf("parse YAML: %w", err)
+	}
+	if err := json.Unmarshal(j, &m); err != nil {
+		return fmt.Errorf("parse volume: %w", err)
+	}
+	if m.Name == "" {
+		return errors.New("volume.name is required")
+	}
+	var sizeMiB uint64
+	if m.Size != "" {
+		sizeMiB, err = parseSize(m.Size)
+		if err != nil {
+			return fmt.Errorf("size: %w", err)
+		}
 	}
 
 	conn, err := dial(addr)
@@ -658,8 +752,50 @@ func workloadApply(addr, path string) error {
 		return err
 	}
 	defer conn.Close()
-	client := capsulev1.NewWorkloadServiceClient(conn)
+	client := capsulev1.NewVolumeServiceClient(conn)
 
+	return withCtx(func(ctx context.Context) error {
+		existing, err := client.Get(ctx, &capsulev1.VolumeGetRequest{Name: m.Name})
+		if err == nil && existing != nil {
+			currentMiB := existing.GetSizeBytes() / (1024 * 1024)
+			switch {
+			case sizeMiB == 0 || sizeMiB == currentMiB:
+				fmt.Printf("volume %q unchanged (%d MiB)\n", m.Name, currentMiB)
+				return nil
+			case sizeMiB > currentMiB:
+				if _, err := client.Resize(ctx, &capsulev1.VolumeResizeRequest{Name: m.Name, NewSizeMib: sizeMiB}); err != nil {
+					return fmt.Errorf("resize: %w", err)
+				}
+				fmt.Printf("volume %q resized %d MiB -> %d MiB\n", m.Name, currentMiB, sizeMiB)
+				return nil
+			default:
+				return fmt.Errorf("volume %q is %d MiB; resize is grow-only (requested %d MiB)", m.Name, currentMiB, sizeMiB)
+			}
+		}
+		// Get failed — assume not-found and create. (gRPC doesn't expose a
+		// stable NotFound discriminator at the client without status, but
+		// any other error from Create will surface a clear message.)
+		if _, err := client.Create(ctx, &capsulev1.VolumeCreateRequest{Name: m.Name, SizeMib: sizeMiB}); err != nil {
+			return fmt.Errorf("create: %w", err)
+		}
+		fmt.Printf("volume %q created (%d MiB)\n", m.Name, sizeMiB)
+		return nil
+	})
+}
+
+// workloadApplyRaw is the byte-input variant of workloadApply, used by
+// applyManifest after it has already read the file.
+func workloadApplyRaw(addr string, raw []byte) error {
+	w, err := parseWorkload(raw)
+	if err != nil {
+		return err
+	}
+	conn, err := dial(addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := capsulev1.NewWorkloadServiceClient(conn)
 	return withCtx(func(ctx context.Context) error {
 		resp, err := client.Apply(ctx, &capsulev1.WorkloadApplyRequest{Workload: w})
 		if err != nil {

@@ -54,14 +54,24 @@ done
 [ -n "$KVER" ] || die "no kernel modules dir under /lib/modules"
 MODDIR="/lib/modules/$KVER/kernel"
 msg "kernel modules dir = $MODDIR"
-for m in drivers/virtio/virtio \
-         drivers/virtio/virtio_ring \
-         drivers/virtio/virtio_pci_modern_dev \
+for m in drivers/virtio/virtio_ring \
+         drivers/virtio/virtio \
          drivers/virtio/virtio_pci_legacy_dev \
+         drivers/virtio/virtio_pci_modern_dev \
          drivers/virtio/virtio_pci \
          drivers/block/virtio_blk \
+         drivers/hwmon/hwmon \
          drivers/nvme/host/nvme-core \
          drivers/nvme/host/nvme \
+         drivers/usb/common/usb-common \
+         drivers/usb/core/usbcore \
+         drivers/usb/host/xhci-hcd \
+         drivers/usb/host/xhci-pci \
+         drivers/scsi/scsi_common \
+         drivers/scsi/scsi_mod \
+         drivers/scsi/sd_mod \
+         drivers/usb/storage/usb-storage \
+         drivers/usb/storage/uas \
          fs/squashfs/squashfs \
          fs/overlayfs/overlay; do
     f="$MODDIR/${m}.ko"
@@ -99,60 +109,61 @@ case "$ROOT" in
 esac
 
 # Block device nodes appear via devtmpfs, but the /dev/disk/by-* symlinks are
-# created by udev/mdev which we don't run. Build the ones we might need by
-# hand by scanning /sys/class/block.
-if [ ! -e "$ROOTDEV" ]; then
-    msg "resolving $ROOTDEV from /sys"
-    case "$ROOT" in
-        PARTUUID=*)
-            want="${ROOT#PARTUUID=}"
-            for p in /sys/class/block/*; do
-                name=$(basename "$p")
-                [ -f "$p/partition" ] || continue
-                # /sys/class/block/<part> is a symlink whose target ends
-                # in .../block/<disk>/<part>. Resolve it and grab the
-                # second-to-last component to get the parent disk name.
-                real=$(readlink -f "$p")
-                disk=$(basename "$(dirname "$real")")
-                # MBR PARTUUID = <disk-signature>-NN where the signature
-                # is 4 bytes at MBR offset 0x1B8 (little-endian on disk;
-                # Linux exposes it as big-endian hex in PARTUUID).
-                if [ -r "/dev/$disk" ]; then
-                    sig=$(dd if=/dev/$disk bs=1 count=4 skip=440 2>/dev/null \
-                          | od -An -tx1 | tr -d ' \n' \
-                          | sed 's/^\(..\)\(..\)\(..\)\(..\)$/\4\3\2\1/')
-                    partno=$(cat "$p/partition")
-                    cand="${sig}-$(printf '%02x' "$partno")"
-                    msg "candidate $name disk=$disk sig=$sig partno=$partno -> $cand"
-                    if [ "$cand" = "$want" ]; then
-                        ROOTDEV="/dev/$name"
-                        break
-                    fi
-                fi
-            done
-            ;;
-        LABEL=*)
-            # For ext4 we could read the label from the superblock, but the
-            # A/B design writes squashfs raw to the slot partitions so
-            # there's no ext4 label to find. Fall back to plain device.
-            ;;
-    esac
-fi
+# created by udev/mdev which we don't run. Resolve to a real /dev path by
+# scanning /sys/class/block. Retry the scan in a 30-second loop because USB
+# storage on real hardware can take 5-10 seconds to enumerate after xhci
+# probe — we'd otherwise scan once before sda* exists and time out.
+case "$ROOT" in
+    PARTUUID=*) want="${ROOT#PARTUUID=}" ;;
+    *)          want="" ;;
+esac
 
-msg "root device = $ROOTDEV (fstype=$ROOTFSTYPE)"
-
-# Wait up to 10 seconds for the block device to settle. virtio_blk module
-# load + PCI bind + device-node creation can take a beat.
+resolved=""
 tries=0
-while [ ! -b "$ROOTDEV" ] && [ $tries -lt 100 ]; do
+while [ -z "$resolved" ] && [ $tries -lt 300 ]; do
+    if [ -e "$ROOTDEV" ]; then
+        resolved="$ROOTDEV"
+        break
+    fi
+    if [ -n "$want" ]; then
+        for p in /sys/class/block/*; do
+            [ -e "$p" ] || continue
+            name=$(basename "$p")
+            [ -f "$p/partition" ] || continue
+            # /sys/class/block/<part> is a symlink whose target ends in
+            # .../block/<disk>/<part>. Grab the parent disk name.
+            real=$(readlink -f "$p")
+            disk=$(basename "$(dirname "$real")")
+            [ -r "/dev/$disk" ] || continue
+            # MBR PARTUUID = <disk-signature>-NN where the signature is 4
+            # bytes at MBR offset 0x1B8 (little-endian on disk; Linux
+            # exposes it as big-endian hex in PARTUUID).
+            sig=$(dd if=/dev/$disk bs=1 count=4 skip=440 2>/dev/null \
+                  | od -An -tx1 | tr -d ' \n' \
+                  | sed 's/^\(..\)\(..\)\(..\)\(..\)$/\4\3\2\1/')
+            partno=$(cat "$p/partition")
+            cand="${sig}-$(printf '%02x' "$partno")"
+            if [ "$cand" = "$want" ]; then
+                resolved="/dev/$name"
+                msg "matched $name (disk=$disk sig=$sig partno=$partno)"
+                break
+            fi
+        done
+    fi
+    [ -n "$resolved" ] && break
     sleep 0.1
     tries=$((tries + 1))
 done
-if [ ! -b "$ROOTDEV" ]; then
-    msg "/dev contents:"; ls /dev | tr '\n' ' '; echo
-    msg "/sys/class/block contents:"; ls /sys/class/block 2>/dev/null | tr '\n' ' '; echo
-    die "root device $ROOTDEV never appeared"
+
+if [ -z "$resolved" ]; then
+    # Send the diag listings via /dev/kmsg so they appear on tty0 (HDMI) too.
+    # Plain ls > stdout goes to /dev/console only — invisible without a serial
+    # cable.
+    msg "/sys/class/block: $(ls /sys/class/block 2>/dev/null | tr '\n' ' ')"
+    msg "/dev: $(ls /dev | tr '\n' ' ')"
+    die "root device $ROOTDEV never appeared (after $((tries / 10))s scan)"
 fi
+ROOTDEV="$resolved"
 
 msg "step: mkdir /mnt"
 mkdir -p /mnt/lower /mnt/upper /mnt/sysroot
