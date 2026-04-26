@@ -37,14 +37,30 @@ mount -t devtmpfs -o nosuid,mode=0755      devtmpfs /dev
 # The same list is harmless on every host: drivers register their PCI/block
 # subsystems and bind to nothing on hardware that isn't there. So the
 # initramfs that boots in QEMU (virtio) is the same one that boots on a
-# Beelink (NVMe).
+# Beelink (SATA / NVMe).
 #
-# Loading order:
-#   virtio + virtio_ring + virtio_pci_*       virtio bus + helpers + bus driver
-#   virtio_blk                                virtio block disks (QEMU/VPS)
-#   libata + libahci + ahci                   AHCI SATA controllers (Beelink M.2 SATA, generic SATA)
-#   nvme_core + nvme                          NVMe block disks (Beelink, most modern hw)
-#   squashfs / overlay                        rootfs filesystems (always needed)
+# !! ORDERING RULE — read before adding anything !!
+# Each module's deps must be loaded earlier in this list. busybox insmod
+# does NOT auto-resolve deps; missing symbols silently fail with rc=2 and
+# the device never enumerates. Verify with `modinfo -F depends <m>` against
+# the host's /lib/modules/<kver>/ tree, then place after every dep.
+# Past bites:
+#   - libata depends on scsi_mod + scsi_common → SCSI core MUST come before
+#     the libata/libahci/ahci block, even though USB-storage (the older
+#     reason scsi_mod was here) is loaded later. Putting AHCI first costs
+#     an entire boot to debug because the only signal is "no /dev/sda".
+#
+# Loading order (top-down = load order; lower entries depend on higher):
+#   virtio_ring → virtio → virtio_pci_*           virtio bus + bus driver
+#   virtio_blk                                    virtio block disks (QEMU/VPS)
+#   hwmon                                         temp sensors (nvme depends)
+#   scsi_common → scsi_mod → sd_mod               SCSI core (libata + USB-storage)
+#   libata → libahci → ahci                       AHCI SATA (Beelink M.2 SATA, generic)
+#   nvme-core → nvme                              NVMe block disks
+#   usb-common → usbcore → xhci-hcd → xhci-pci    USB stack
+#   usb-storage → uas                             USB block disks (installer media)
+#   squashfs                                      rootfs filesystem
+#   overlay                                       rw layer over squashfs
 #
 # Modules missing from the kernel (built-in on linux-virt; loadable on
 # linux-lts) are silently skipped — same code path works for both flavors.

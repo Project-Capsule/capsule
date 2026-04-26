@@ -46,7 +46,11 @@ linux /vmlinuz_<a|b> root=PARTUUID=b1a570ff-0(2|3) rootfstype=squashfs ro capsul
 initrd /initramfs_<a|b>
    ↓
 custom busybox-static initramfs:
-   - loads modules in dependency order (virtio_ring → virtio → nvme → squashfs → overlay → ...)
+   - loads modules in dependency order (virtio → SCSI core → AHCI → NVMe → USB → squashfs → overlay).
+     busybox `insmod` does NOT auto-resolve deps, so each module's deps must
+     load earlier in the list — see the "ORDERING RULE" comment in
+     `image/initramfs-init`. A misorder fails silently with rc=2 and the
+     device never enumerates.
    - retries up to 30 s for /dev/disk/by-partuuid/b1a570ff-0(2|3) to appear (USB boot can be slow)
    - mounts the slot squashfs read-only at /media/root-ro
    - tmpfs at /media/root-rw, overlayfs writable upper at /media/root-rw/upper
