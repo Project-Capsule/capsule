@@ -32,6 +32,7 @@ capsulectl [--capsule host:port] workload stop <name>
 capsulectl [--capsule host:port] workload start <name>
 capsulectl [--capsule host:port] workload logs [-f] [-n N] [--serial] <name>
 capsulectl [--capsule host:port] workload exec [-t] <name> -- <cmd> [args...]
+capsulectl [--capsule host:port] cp <src> <dst>
 capsulectl [--capsule host:port] volume create [--size 10GiB] <name>
 capsulectl [--capsule host:port] volume list
 capsulectl [--capsule host:port] volume get <name>
@@ -121,6 +122,37 @@ capsulectl workload exec -t alpine-shell -- /bin/sh
 ### `workload start | stop | restart | delete`
 
 `start` brings up a stopped workload. `stop` leaves the row in the DB. `restart` is `stop` + `start`. `delete` stops the workload and removes its row entirely.
+
+## `cp`
+
+```
+capsulectl cp <src> <dst>
+```
+
+Copy files or directories to/from a running workload. Exactly one of `<src>` and `<dst>` is `<workload>:<absolute-path>` (scp-style); the other is a local path.
+
+```sh
+# Local → workload
+capsulectl cp ./config.toml api:/etc/app/config.toml      # rename: lands at /etc/app/config.toml
+capsulectl cp ./config.toml api:/etc/app/                 # into dir: lands at /etc/app/config.toml
+capsulectl cp ./assets api:/srv/                          # whole tree: lands at /srv/assets/...
+capsulectl cp ./assets api:/srv/static                    # whole tree, renamed: lands at /srv/static/...
+
+# Workload → local
+capsulectl cp api:/var/log/app.log ./app.log              # single file
+capsulectl cp api:/etc ./etc-backup                       # whole tree (rename root)
+capsulectl cp api:/etc ./backups/                         # whole tree, into existing dir
+```
+
+When pushing into a workload, the destination resolves the way `cp`/`scp` do:
+
+1. Trailing `/` → always treated as "into this directory" (created if missing).
+2. Existing directory inside the workload → "into directory" (so `cp foo wl:/tmp` lands at `/tmp/foo`, not as a file overwriting `/tmp`).
+3. Otherwise → the destination is the exact final path; the source is renamed to that path (and any existing file/dir there is overwritten).
+
+When pulling from a workload, the same rules apply against the local destination — including the existing-directory check on your laptop.
+
+Wire format is a tar stream. The workload image must include `/bin/sh` plus the basic POSIX shell tools (`mkdir`, `mktemp`, `mv`, `ls`, `wc`, `dirname`) and `tar` — universal in busybox/alpine/debian-derived images, **not** present in `scratch`.
 
 ## `volume`
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -454,6 +455,24 @@ func (d *Driver) Exec(parentCtx context.Context, req runtime.ExecRequest) (int, 
 		pspec.Env = mergeEnv(pspec.Env, req.Env)
 	}
 
+	// Wire stdin EOF detection BEFORE building the cio.Creator: cio
+	// stops copying when the host-side Reader returns EOF but does NOT
+	// close the in-container stdin FIFO, so a process like `tar x` or
+	// `cat` blocks forever waiting for more input that will never come.
+	// The fix is an explicit process.CloseIO(WithStdinCloser) once we
+	// see EOF; we wrap the Reader to spot that moment, then trigger
+	// from a goroutine after Start so we have `process` in hand.
+	// Skipped for TTY mode — pseudo-terminals signal EOF via ^D inband
+	// and don't use the stdin FIFO close path.
+	stdinEOF := make(chan struct{})
+	if req.Stdin != nil && !req.TTY {
+		req.Stdin = &eofSignalReader{r: req.Stdin, ch: stdinEOF}
+	} else {
+		// Make the channel a no-op receiver so the goroutine selects
+		// cleanly even when we don't expect an EOF.
+		stdinEOF = nil
+	}
+
 	// Build cio.Creator wired to the caller's streams.
 	creator := execIO(req)
 
@@ -471,6 +490,19 @@ func (d *Driver) Exec(parentCtx context.Context, req runtime.ExecRequest) (int, 
 
 	if err := process.Start(ctx); err != nil {
 		return -1, fmt.Errorf("process start: %w", err)
+	}
+
+	// Stdin-EOF closer (see comment above). Goroutine exits on whichever
+	// fires first; CloseIO is idempotent if the process has already
+	// exited so the late-EOF case is harmless.
+	if stdinEOF != nil {
+		go func() {
+			select {
+			case <-stdinEOF:
+				_ = process.CloseIO(ctx, containerd.WithStdinCloser)
+			case <-ctx.Done():
+			}
+		}()
 	}
 
 	// Forward resize events while the process runs.
@@ -517,6 +549,23 @@ func execIO(req runtime.ExecRequest) cio.Creator {
 type nopWriter struct{}
 
 func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// eofSignalReader wraps an io.Reader and closes ch the first time the
+// underlying Read returns io.EOF. Used by Exec to know when to issue
+// containerd's WithStdinCloser — see the comment in Exec.
+type eofSignalReader struct {
+	r    io.Reader
+	ch   chan struct{}
+	once sync.Once
+}
+
+func (s *eofSignalReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if err == io.EOF {
+		s.once.Do(func() { close(s.ch) })
+	}
+	return n, err
+}
 
 // Volume paths on the capsule:
 //   - backing LV: /dev/capsule/vol-<name> (ext4 formatted thin LV)

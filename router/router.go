@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
 
 	"github.com/geekgonecrazy/capsule/controllers"
@@ -42,7 +44,23 @@ func Serve(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("router: listen %s: %w", cfg.Addr, err)
 	}
 
-	srv := grpc.NewServer()
+	// Keepalive: long-running streams (logs -f, exec) need to fail
+	// fast when the underlying connection breaks (capsule reboot,
+	// network blip) instead of stalling in Recv() until the OS gives
+	// up on the TCP connection. EnforcementPolicy.MinTime must be
+	// <= the client's keepalive Time so the client's pings aren't
+	// rejected as too frequent — keep these in sync with capsulectl's
+	// dial() params.
+	srv := grpc.NewServer(
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    30 * time.Second,
+			Timeout: 10 * time.Second,
+		}),
+	)
 	capsulev1.RegisterCapsuleServiceServer(srv, cfg.Capsule)
 	if cfg.Workload != nil {
 		capsulev1.RegisterWorkloadServiceServer(srv, cfg.Workload)

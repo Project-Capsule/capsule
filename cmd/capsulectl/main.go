@@ -20,6 +20,7 @@ import (
 	"golang.org/x/term"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/encoding/protojson"
 	sigsyaml "sigs.k8s.io/yaml"
 
@@ -39,6 +40,15 @@ func main() {
 		os.Exit(2)
 	}
 	rest := global.Args()
+	// `cp` is a top-level verb (no group/subcommand split), so we
+	// dispatch it before the group+cmd switch.
+	if len(rest) >= 1 && rest[0] == "cp" {
+		if err := runCp(*addr, rest[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(rest) < 2 {
 		usage()
 		os.Exit(2)
@@ -233,6 +243,7 @@ Usage:
   capsulectl [--capsule host:port] workload start <name>
   capsulectl [--capsule host:port] workload logs [-f] [-n N] [--serial] <name>
   capsulectl [--capsule host:port] workload exec [-t] <name> -- <cmd> [args...]
+  capsulectl [--capsule host:port] cp <src> <dst>                # files/dirs to or from a workload
   capsulectl [--capsule host:port] volume create [--size 10GiB] <name>
   capsulectl [--capsule host:port] volume list
   capsulectl [--capsule host:port] volume get <name>
@@ -242,7 +253,21 @@ Usage:
 }
 
 func dial(addr string) (*grpc.ClientConn, error) {
-	return grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Keepalive: ping every 15 s during a stream and consider the
+	// connection dead if no ack within 10 s. Without this, long-running
+	// streams (logs -f, exec) just hang in Recv() forever when the
+	// capsule reboots or the network drops — the OS won't notice the
+	// dead TCP connection for ages. PermitWithoutStream lets us catch a
+	// reboot even between RPCs. Time must stay >= the server's
+	// EnforcementPolicy.MinTime (router.go) or pings get rejected.
+	return grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                15 * time.Second,
+			Timeout:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
+	)
 }
 
 func withCtx(fn func(ctx context.Context) error) error {

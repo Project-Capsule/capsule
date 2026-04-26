@@ -29,6 +29,27 @@ service WorkloadService {
   // Start sets desired state back to RUNNING; the reconciler picks it
   // up and brings the workload back.
   rpc Start(WorkloadStartRequest) returns (WorkloadStartResponse);
+  // CopyTo streams a tar archive from the client into the workload at
+  // metadata.dest_path. The first client message MUST be
+  // WorkloadCopyToRequest.metadata; subsequent messages carry tar bytes.
+  // The server inspects dest_path and chooses between:
+  //   - "into" mode (extract entries directly under dest_path) when
+  //     dest_path ends with '/' OR is an existing directory inside the
+  //     workload — same as cp/scp/docker-cp behaviour.
+  //   - "as" mode (extract to a temp dir, then rename the single
+  //     top-level entry to dest_path) otherwise. Overwrites whatever
+  //     was at dest_path.
+  // Workload image must include /bin/sh, mkdir, mktemp, mv, ls, wc, and
+  // tar (universal in busybox/alpine/debian-derived images; not present
+  // in `scratch`). Handles files, directories, and symlinks via tar's
+  // normal semantics.
+  rpc CopyTo(stream WorkloadCopyToRequest) returns (WorkloadCopyToResponse);
+  // CopyFrom tars up src_path inside the workload and streams the
+  // archive bytes back. Server runs `tar c -C <dirname(src_path)> --
+  // <basename(src_path)>`. The archive contains a single top-level
+  // entry (regular file or directory) named basename(src_path); the
+  // client is responsible for any rename/extract behaviour.
+  rpc CopyFrom(WorkloadCopyFromRequest) returns (stream WorkloadCopyFromChunk);
 }
 
 enum DesiredState {
@@ -287,3 +308,42 @@ message WorkloadStopResponse {}
 
 message WorkloadStartRequest { string name = 1; }
 message WorkloadStartResponse {}
+
+// --- Copy ---
+
+message WorkloadCopyToRequest {
+  oneof payload {
+    WorkloadCopyToMetadata metadata = 1;
+    // Raw tar archive bytes. Stream as many as needed; close-send when done.
+    bytes chunk = 2;
+  }
+}
+
+message WorkloadCopyToMetadata {
+  // Name of the running workload to copy into.
+  string name = 1;
+  // Absolute path inside the workload to copy to. A trailing '/' OR the
+  // path being an existing directory means "extract entries directly
+  // beneath this path". Anything else means "the single top-level
+  // archive entry is renamed to this path". Parent directories are
+  // created with `mkdir -p` as needed.
+  string dest_path = 2;
+}
+
+message WorkloadCopyToResponse {
+  // Total tar bytes received from the client.
+  int64 bytes_received = 1;
+}
+
+message WorkloadCopyFromRequest {
+  // Name of the running workload to copy from.
+  string name = 1;
+  // Absolute path inside the workload to archive. May refer to a
+  // regular file or a directory; tar handles either.
+  string src_path = 2;
+}
+
+message WorkloadCopyFromChunk {
+  // Raw tar archive bytes.
+  bytes data = 1;
+}

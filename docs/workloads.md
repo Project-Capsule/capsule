@@ -180,6 +180,7 @@ capsulectl workload get <name>                 # full spec + status
 capsulectl workload logs [-f] [-n N] <name>    # stdout/stderr
 capsulectl workload logs --serial <name>       # microVMs only — Firecracker serial console
 capsulectl workload exec [-t] <name> -- /bin/sh
+capsulectl cp <src> <dst>                      # copy files/dirs to/from a workload (scp-style)
 capsulectl workload restart <name>
 capsulectl workload stop <name>                # stop, leave the row in the DB
 capsulectl workload start <name>               # start a stopped workload
@@ -187,6 +188,8 @@ capsulectl workload delete <name>              # stop + delete the row
 ```
 
 `workload exec` works for both containers and microVMs. For microVMs, it goes through `capsule-guest`'s vsock agent and into the runc payload — same UX as a container exec.
+
+`cp` streams a tar archive over the same exec path, so it works uniformly for containers and microVMs. The workload image must include `/bin/sh`, `mkdir`, and `tar` (universal in busybox/alpine/debian-derived images; not in `scratch`). See [cli.md](cli.md#cp) for path semantics.
 
 `workload logs --serial` is microVM-only; it streams the Firecracker serial console (kernel boot + `capsule-guest` + early failures). Use it when the guest agent isn't reachable (e.g. the VM's kernel didn't come up).
 

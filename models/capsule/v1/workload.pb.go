@@ -1927,6 +1927,292 @@ func (*WorkloadStartResponse) Descriptor() ([]byte, []int) {
 	return file_capsule_v1_workload_proto_rawDescGZIP(), []int{25}
 }
 
+type WorkloadCopyToRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Payload:
+	//
+	//	*WorkloadCopyToRequest_Metadata
+	//	*WorkloadCopyToRequest_Chunk
+	Payload       isWorkloadCopyToRequest_Payload `protobuf_oneof:"payload"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkloadCopyToRequest) Reset() {
+	*x = WorkloadCopyToRequest{}
+	mi := &file_capsule_v1_workload_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkloadCopyToRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkloadCopyToRequest) ProtoMessage() {}
+
+func (x *WorkloadCopyToRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_workload_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkloadCopyToRequest.ProtoReflect.Descriptor instead.
+func (*WorkloadCopyToRequest) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_workload_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *WorkloadCopyToRequest) GetPayload() isWorkloadCopyToRequest_Payload {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+func (x *WorkloadCopyToRequest) GetMetadata() *WorkloadCopyToMetadata {
+	if x != nil {
+		if x, ok := x.Payload.(*WorkloadCopyToRequest_Metadata); ok {
+			return x.Metadata
+		}
+	}
+	return nil
+}
+
+func (x *WorkloadCopyToRequest) GetChunk() []byte {
+	if x != nil {
+		if x, ok := x.Payload.(*WorkloadCopyToRequest_Chunk); ok {
+			return x.Chunk
+		}
+	}
+	return nil
+}
+
+type isWorkloadCopyToRequest_Payload interface {
+	isWorkloadCopyToRequest_Payload()
+}
+
+type WorkloadCopyToRequest_Metadata struct {
+	Metadata *WorkloadCopyToMetadata `protobuf:"bytes,1,opt,name=metadata,proto3,oneof"`
+}
+
+type WorkloadCopyToRequest_Chunk struct {
+	// Raw tar archive bytes. Stream as many as needed; close-send when done.
+	Chunk []byte `protobuf:"bytes,2,opt,name=chunk,proto3,oneof"`
+}
+
+func (*WorkloadCopyToRequest_Metadata) isWorkloadCopyToRequest_Payload() {}
+
+func (*WorkloadCopyToRequest_Chunk) isWorkloadCopyToRequest_Payload() {}
+
+type WorkloadCopyToMetadata struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Name of the running workload to copy into.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Absolute path inside the workload to copy to. A trailing '/' OR the
+	// path being an existing directory means "extract entries directly
+	// beneath this path". Anything else means "the single top-level
+	// archive entry is renamed to this path". Parent directories are
+	// created with `mkdir -p` as needed.
+	DestPath      string `protobuf:"bytes,2,opt,name=dest_path,json=destPath,proto3" json:"dest_path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkloadCopyToMetadata) Reset() {
+	*x = WorkloadCopyToMetadata{}
+	mi := &file_capsule_v1_workload_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkloadCopyToMetadata) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkloadCopyToMetadata) ProtoMessage() {}
+
+func (x *WorkloadCopyToMetadata) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_workload_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkloadCopyToMetadata.ProtoReflect.Descriptor instead.
+func (*WorkloadCopyToMetadata) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_workload_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *WorkloadCopyToMetadata) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *WorkloadCopyToMetadata) GetDestPath() string {
+	if x != nil {
+		return x.DestPath
+	}
+	return ""
+}
+
+type WorkloadCopyToResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Total tar bytes received from the client.
+	BytesReceived int64 `protobuf:"varint,1,opt,name=bytes_received,json=bytesReceived,proto3" json:"bytes_received,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkloadCopyToResponse) Reset() {
+	*x = WorkloadCopyToResponse{}
+	mi := &file_capsule_v1_workload_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkloadCopyToResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkloadCopyToResponse) ProtoMessage() {}
+
+func (x *WorkloadCopyToResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_workload_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkloadCopyToResponse.ProtoReflect.Descriptor instead.
+func (*WorkloadCopyToResponse) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_workload_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *WorkloadCopyToResponse) GetBytesReceived() int64 {
+	if x != nil {
+		return x.BytesReceived
+	}
+	return 0
+}
+
+type WorkloadCopyFromRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Name of the running workload to copy from.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Absolute path inside the workload to archive. May refer to a
+	// regular file or a directory; tar handles either.
+	SrcPath       string `protobuf:"bytes,2,opt,name=src_path,json=srcPath,proto3" json:"src_path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkloadCopyFromRequest) Reset() {
+	*x = WorkloadCopyFromRequest{}
+	mi := &file_capsule_v1_workload_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkloadCopyFromRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkloadCopyFromRequest) ProtoMessage() {}
+
+func (x *WorkloadCopyFromRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_workload_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkloadCopyFromRequest.ProtoReflect.Descriptor instead.
+func (*WorkloadCopyFromRequest) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_workload_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *WorkloadCopyFromRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *WorkloadCopyFromRequest) GetSrcPath() string {
+	if x != nil {
+		return x.SrcPath
+	}
+	return ""
+}
+
+type WorkloadCopyFromChunk struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Raw tar archive bytes.
+	Data          []byte `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WorkloadCopyFromChunk) Reset() {
+	*x = WorkloadCopyFromChunk{}
+	mi := &file_capsule_v1_workload_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WorkloadCopyFromChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WorkloadCopyFromChunk) ProtoMessage() {}
+
+func (x *WorkloadCopyFromChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_workload_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WorkloadCopyFromChunk.ProtoReflect.Descriptor instead.
+func (*WorkloadCopyFromChunk) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_workload_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *WorkloadCopyFromChunk) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
 var File_capsule_v1_workload_proto protoreflect.FileDescriptor
 
 const file_capsule_v1_workload_proto_rawDesc = "" +
@@ -2045,7 +2331,21 @@ const file_capsule_v1_workload_proto_rawDesc = "" +
 	"\x14WorkloadStopResponse\"*\n" +
 	"\x14WorkloadStartRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x17\n" +
-	"\x15WorkloadStartResponse*\x7f\n" +
+	"\x15WorkloadStartResponse\"|\n" +
+	"\x15WorkloadCopyToRequest\x12@\n" +
+	"\bmetadata\x18\x01 \x01(\v2\".capsule.v1.WorkloadCopyToMetadataH\x00R\bmetadata\x12\x16\n" +
+	"\x05chunk\x18\x02 \x01(\fH\x00R\x05chunkB\t\n" +
+	"\apayload\"I\n" +
+	"\x16WorkloadCopyToMetadata\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1b\n" +
+	"\tdest_path\x18\x02 \x01(\tR\bdestPath\"?\n" +
+	"\x16WorkloadCopyToResponse\x12%\n" +
+	"\x0ebytes_received\x18\x01 \x01(\x03R\rbytesReceived\"H\n" +
+	"\x17WorkloadCopyFromRequest\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
+	"\bsrc_path\x18\x02 \x01(\tR\asrcPath\"+\n" +
+	"\x15WorkloadCopyFromChunk\x12\x12\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data*\x7f\n" +
 	"\fDesiredState\x12\x1d\n" +
 	"\x19DESIRED_STATE_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15DESIRED_STATE_RUNNING\x10\x01\x12\x19\n" +
@@ -2072,7 +2372,7 @@ const file_capsule_v1_workload_proto_rawDesc = "" +
 	"\tLogSource\x12\x1a\n" +
 	"\x16LOG_SOURCE_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12LOG_SOURCE_PAYLOAD\x10\x01\x12\x15\n" +
-	"\x11LOG_SOURCE_SERIAL\x10\x022\xc8\x05\n" +
+	"\x11LOG_SOURCE_SERIAL\x10\x022\xf1\x06\n" +
 	"\x0fWorkloadService\x12L\n" +
 	"\x05Apply\x12 .capsule.v1.WorkloadApplyRequest\x1a!.capsule.v1.WorkloadApplyResponse\x12;\n" +
 	"\x03Get\x12\x1e.capsule.v1.WorkloadGetRequest\x1a\x14.capsule.v1.Workload\x12I\n" +
@@ -2082,7 +2382,9 @@ const file_capsule_v1_workload_proto_rawDesc = "" +
 	"\x04Exec\x12%.capsule.v1.WorkloadExecClientMessage\x1a%.capsule.v1.WorkloadExecServerMessage(\x010\x01\x12R\n" +
 	"\aRestart\x12\".capsule.v1.WorkloadRestartRequest\x1a#.capsule.v1.WorkloadRestartResponse\x12I\n" +
 	"\x04Stop\x12\x1f.capsule.v1.WorkloadStopRequest\x1a .capsule.v1.WorkloadStopResponse\x12L\n" +
-	"\x05Start\x12 .capsule.v1.WorkloadStartRequest\x1a!.capsule.v1.WorkloadStartResponseB\xa6\x01\n" +
+	"\x05Start\x12 .capsule.v1.WorkloadStartRequest\x1a!.capsule.v1.WorkloadStartResponse\x12Q\n" +
+	"\x06CopyTo\x12!.capsule.v1.WorkloadCopyToRequest\x1a\".capsule.v1.WorkloadCopyToResponse(\x01\x12T\n" +
+	"\bCopyFrom\x12#.capsule.v1.WorkloadCopyFromRequest\x1a!.capsule.v1.WorkloadCopyFromChunk0\x01B\xa6\x01\n" +
 	"\x0ecom.capsule.v1B\rWorkloadProtoP\x01Z<github.com/geekgonecrazy/capsule/models/capsule/v1;capsulev1\xa2\x02\x03CXX\xaa\x02\n" +
 	"Capsule.V1\xca\x02\n" +
 	"Capsule\\V1\xe2\x02\x16Capsule\\V1\\GPBMetadata\xea\x02\vCapsule::V1b\x06proto3"
@@ -2100,7 +2402,7 @@ func file_capsule_v1_workload_proto_rawDescGZIP() []byte {
 }
 
 var file_capsule_v1_workload_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_capsule_v1_workload_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_capsule_v1_workload_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_capsule_v1_workload_proto_goTypes = []any{
 	(DesiredState)(0),                 // 0: capsule.v1.DesiredState
 	(WorkloadKind)(0),                 // 1: capsule.v1.WorkloadKind
@@ -2134,9 +2436,14 @@ var file_capsule_v1_workload_proto_goTypes = []any{
 	(*WorkloadStopResponse)(nil),      // 29: capsule.v1.WorkloadStopResponse
 	(*WorkloadStartRequest)(nil),      // 30: capsule.v1.WorkloadStartRequest
 	(*WorkloadStartResponse)(nil),     // 31: capsule.v1.WorkloadStartResponse
-	nil,                               // 32: capsule.v1.ContainerSpec.EnvEntry
-	nil,                               // 33: capsule.v1.MicroVMSpec.EnvEntry
-	nil,                               // 34: capsule.v1.WorkloadExecConfig.EnvEntry
+	(*WorkloadCopyToRequest)(nil),     // 32: capsule.v1.WorkloadCopyToRequest
+	(*WorkloadCopyToMetadata)(nil),    // 33: capsule.v1.WorkloadCopyToMetadata
+	(*WorkloadCopyToResponse)(nil),    // 34: capsule.v1.WorkloadCopyToResponse
+	(*WorkloadCopyFromRequest)(nil),   // 35: capsule.v1.WorkloadCopyFromRequest
+	(*WorkloadCopyFromChunk)(nil),     // 36: capsule.v1.WorkloadCopyFromChunk
+	nil,                               // 37: capsule.v1.ContainerSpec.EnvEntry
+	nil,                               // 38: capsule.v1.MicroVMSpec.EnvEntry
+	nil,                               // 39: capsule.v1.WorkloadExecConfig.EnvEntry
 }
 var file_capsule_v1_workload_proto_depIdxs = []int32{
 	1,  // 0: capsule.v1.Workload.kind:type_name -> capsule.v1.WorkloadKind
@@ -2144,11 +2451,11 @@ var file_capsule_v1_workload_proto_depIdxs = []int32{
 	9,  // 2: capsule.v1.Workload.micro_vm:type_name -> capsule.v1.MicroVMSpec
 	11, // 3: capsule.v1.Workload.status:type_name -> capsule.v1.WorkloadStatus
 	0,  // 4: capsule.v1.Workload.desired_state:type_name -> capsule.v1.DesiredState
-	32, // 5: capsule.v1.ContainerSpec.env:type_name -> capsule.v1.ContainerSpec.EnvEntry
+	37, // 5: capsule.v1.ContainerSpec.env:type_name -> capsule.v1.ContainerSpec.EnvEntry
 	10, // 6: capsule.v1.ContainerSpec.mounts:type_name -> capsule.v1.VolumeMount
 	3,  // 7: capsule.v1.ContainerSpec.network_mode:type_name -> capsule.v1.NetworkMode
 	8,  // 8: capsule.v1.ContainerSpec.ports:type_name -> capsule.v1.PortMapping
-	33, // 9: capsule.v1.MicroVMSpec.env:type_name -> capsule.v1.MicroVMSpec.EnvEntry
+	38, // 9: capsule.v1.MicroVMSpec.env:type_name -> capsule.v1.MicroVMSpec.EnvEntry
 	10, // 10: capsule.v1.MicroVMSpec.mounts:type_name -> capsule.v1.VolumeMount
 	4,  // 11: capsule.v1.MicroVMSpec.backend:type_name -> capsule.v1.MicroVMBackend
 	8,  // 12: capsule.v1.MicroVMSpec.ports:type_name -> capsule.v1.PortMapping
@@ -2159,31 +2466,36 @@ var file_capsule_v1_workload_proto_depIdxs = []int32{
 	5,  // 17: capsule.v1.WorkloadLogsRequest.source:type_name -> capsule.v1.LogSource
 	22, // 18: capsule.v1.WorkloadExecClientMessage.config:type_name -> capsule.v1.WorkloadExecConfig
 	23, // 19: capsule.v1.WorkloadExecClientMessage.resize:type_name -> capsule.v1.WorkloadExecResize
-	34, // 20: capsule.v1.WorkloadExecConfig.env:type_name -> capsule.v1.WorkloadExecConfig.EnvEntry
+	39, // 20: capsule.v1.WorkloadExecConfig.env:type_name -> capsule.v1.WorkloadExecConfig.EnvEntry
 	25, // 21: capsule.v1.WorkloadExecServerMessage.exit:type_name -> capsule.v1.WorkloadExecExit
-	12, // 22: capsule.v1.WorkloadService.Apply:input_type -> capsule.v1.WorkloadApplyRequest
-	14, // 23: capsule.v1.WorkloadService.Get:input_type -> capsule.v1.WorkloadGetRequest
-	15, // 24: capsule.v1.WorkloadService.List:input_type -> capsule.v1.WorkloadListRequest
-	17, // 25: capsule.v1.WorkloadService.Delete:input_type -> capsule.v1.WorkloadDeleteRequest
-	19, // 26: capsule.v1.WorkloadService.Logs:input_type -> capsule.v1.WorkloadLogsRequest
-	21, // 27: capsule.v1.WorkloadService.Exec:input_type -> capsule.v1.WorkloadExecClientMessage
-	26, // 28: capsule.v1.WorkloadService.Restart:input_type -> capsule.v1.WorkloadRestartRequest
-	28, // 29: capsule.v1.WorkloadService.Stop:input_type -> capsule.v1.WorkloadStopRequest
-	30, // 30: capsule.v1.WorkloadService.Start:input_type -> capsule.v1.WorkloadStartRequest
-	13, // 31: capsule.v1.WorkloadService.Apply:output_type -> capsule.v1.WorkloadApplyResponse
-	6,  // 32: capsule.v1.WorkloadService.Get:output_type -> capsule.v1.Workload
-	16, // 33: capsule.v1.WorkloadService.List:output_type -> capsule.v1.WorkloadListResponse
-	18, // 34: capsule.v1.WorkloadService.Delete:output_type -> capsule.v1.WorkloadDeleteResponse
-	20, // 35: capsule.v1.WorkloadService.Logs:output_type -> capsule.v1.WorkloadLogChunk
-	24, // 36: capsule.v1.WorkloadService.Exec:output_type -> capsule.v1.WorkloadExecServerMessage
-	27, // 37: capsule.v1.WorkloadService.Restart:output_type -> capsule.v1.WorkloadRestartResponse
-	29, // 38: capsule.v1.WorkloadService.Stop:output_type -> capsule.v1.WorkloadStopResponse
-	31, // 39: capsule.v1.WorkloadService.Start:output_type -> capsule.v1.WorkloadStartResponse
-	31, // [31:40] is the sub-list for method output_type
-	22, // [22:31] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	33, // 22: capsule.v1.WorkloadCopyToRequest.metadata:type_name -> capsule.v1.WorkloadCopyToMetadata
+	12, // 23: capsule.v1.WorkloadService.Apply:input_type -> capsule.v1.WorkloadApplyRequest
+	14, // 24: capsule.v1.WorkloadService.Get:input_type -> capsule.v1.WorkloadGetRequest
+	15, // 25: capsule.v1.WorkloadService.List:input_type -> capsule.v1.WorkloadListRequest
+	17, // 26: capsule.v1.WorkloadService.Delete:input_type -> capsule.v1.WorkloadDeleteRequest
+	19, // 27: capsule.v1.WorkloadService.Logs:input_type -> capsule.v1.WorkloadLogsRequest
+	21, // 28: capsule.v1.WorkloadService.Exec:input_type -> capsule.v1.WorkloadExecClientMessage
+	26, // 29: capsule.v1.WorkloadService.Restart:input_type -> capsule.v1.WorkloadRestartRequest
+	28, // 30: capsule.v1.WorkloadService.Stop:input_type -> capsule.v1.WorkloadStopRequest
+	30, // 31: capsule.v1.WorkloadService.Start:input_type -> capsule.v1.WorkloadStartRequest
+	32, // 32: capsule.v1.WorkloadService.CopyTo:input_type -> capsule.v1.WorkloadCopyToRequest
+	35, // 33: capsule.v1.WorkloadService.CopyFrom:input_type -> capsule.v1.WorkloadCopyFromRequest
+	13, // 34: capsule.v1.WorkloadService.Apply:output_type -> capsule.v1.WorkloadApplyResponse
+	6,  // 35: capsule.v1.WorkloadService.Get:output_type -> capsule.v1.Workload
+	16, // 36: capsule.v1.WorkloadService.List:output_type -> capsule.v1.WorkloadListResponse
+	18, // 37: capsule.v1.WorkloadService.Delete:output_type -> capsule.v1.WorkloadDeleteResponse
+	20, // 38: capsule.v1.WorkloadService.Logs:output_type -> capsule.v1.WorkloadLogChunk
+	24, // 39: capsule.v1.WorkloadService.Exec:output_type -> capsule.v1.WorkloadExecServerMessage
+	27, // 40: capsule.v1.WorkloadService.Restart:output_type -> capsule.v1.WorkloadRestartResponse
+	29, // 41: capsule.v1.WorkloadService.Stop:output_type -> capsule.v1.WorkloadStopResponse
+	31, // 42: capsule.v1.WorkloadService.Start:output_type -> capsule.v1.WorkloadStartResponse
+	34, // 43: capsule.v1.WorkloadService.CopyTo:output_type -> capsule.v1.WorkloadCopyToResponse
+	36, // 44: capsule.v1.WorkloadService.CopyFrom:output_type -> capsule.v1.WorkloadCopyFromChunk
+	34, // [34:45] is the sub-list for method output_type
+	23, // [23:34] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_capsule_v1_workload_proto_init() }
@@ -2201,13 +2513,17 @@ func file_capsule_v1_workload_proto_init() {
 		(*WorkloadExecServerMessage_Stderr)(nil),
 		(*WorkloadExecServerMessage_Exit)(nil),
 	}
+	file_capsule_v1_workload_proto_msgTypes[26].OneofWrappers = []any{
+		(*WorkloadCopyToRequest_Metadata)(nil),
+		(*WorkloadCopyToRequest_Chunk)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_capsule_v1_workload_proto_rawDesc), len(file_capsule_v1_workload_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   29,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

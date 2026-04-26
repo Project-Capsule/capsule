@@ -14,6 +14,7 @@ This folder is the operator's manual.
 
 - **[architecture.md](architecture.md)** — Disk layout, boot chain, runtime drivers, networking, volumes, store. Read this when something breaks at a layer the higher-level guides don't cover.
 - **[updates.md](updates.md)** — A/B OS updates: how `capsule update push` ships a new bundle, the tentative-commit window, and automatic rollback.
+- **[operations.md](operations.md)** — Breakglass runbooks: growing the PERM partition, debug-container gotchas, and other things that don't (yet) have a first-class verb.
 
 ## Vocabulary
 

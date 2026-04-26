@@ -111,6 +111,17 @@ func (c *WorkloadController) Logs(req *capsulev1.WorkloadLogsRequest, stream cap
 		source = workload.LogSourceSerial
 	}
 
+	// shouldStop ends the follow loop once the workload is no longer
+	// running — without it, `logs -f` hangs forever after a workload
+	// exits/stops/is deleted (the file just stops growing; EOF + sleep
+	// + retry forever). Throttled so we don't query the store on every
+	// idle tick. Nil for non-follow reads since the loop returns at EOF
+	// anyway.
+	var shouldStop func() bool
+	if req.GetFollow() {
+		shouldStop = makeLogsShouldStop(c.Service, name)
+	}
+
 	// For containers (payload logs only), we apply tail_lines by seeking
 	// in the file before streaming. That needs *os.File semantics, so
 	// keep the file path fast-path for that case; fall back to OpenLogs
@@ -123,7 +134,7 @@ func (c *WorkloadController) Logs(req *capsulev1.WorkloadLogsRequest, stream cap
 				if err := seekTail(f, int(req.GetTailLines())); err != nil {
 					return status.Error(codes.Internal, err.Error())
 				}
-				return streamReaderToLogs(ctx, f, req.GetFollow(), stream)
+				return streamReaderToLogs(ctx, f, req.GetFollow(), shouldStop, stream)
 			}
 		}
 	}
@@ -136,15 +147,51 @@ func (c *WorkloadController) Logs(req *capsulev1.WorkloadLogsRequest, stream cap
 		return status.Error(codes.Internal, err.Error())
 	}
 	defer rc.Close()
-	return streamReaderToLogs(ctx, rc, req.GetFollow(), stream)
+	return streamReaderToLogs(ctx, rc, req.GetFollow(), shouldStop, stream)
+}
+
+// makeLogsShouldStop returns a closure that reports whether a follow-mode
+// log stream should give up. Returns true once the named workload's
+// observed phase is no longer RUNNING or PENDING (so STOPPED, FAILED,
+// DELETING, or "row vanished" all end the stream cleanly). Internally
+// throttled to one store lookup per check interval — the server can be
+// woken on every 250 ms EOF tick and we don't want to thrash SQLite.
+func makeLogsShouldStop(svc *workload.Service, name string) func() bool {
+	const interval = 2 * time.Second
+	var lastCheck time.Time
+	var lastResult bool
+	return func() bool {
+		if time.Since(lastCheck) < interval {
+			return lastResult
+		}
+		lastCheck = time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer cancel()
+		w, err := svc.Get(ctx, name)
+		if err != nil {
+			// Workload was deleted (or store hiccup). Treat both as "stop"
+			// — better to bail than to spin against a missing target.
+			lastResult = true
+			return true
+		}
+		switch w.GetStatus().GetPhase() {
+		case capsulev1.WorkloadPhase_WORKLOAD_PHASE_RUNNING,
+			capsulev1.WorkloadPhase_WORKLOAD_PHASE_PENDING:
+			lastResult = false
+		default:
+			lastResult = true
+		}
+		return lastResult
+	}
 }
 
 // streamReaderToLogs pumps r's bytes into the gRPC Logs stream. If
-// follow is true and r returns EOF, blocks briefly and retries so we
-// tail file-backed sources; for guest-agent streams the server side
-// already holds the connection open until payload exit so EOF ends
-// the stream naturally.
-func streamReaderToLogs(ctx context.Context, r io.Reader, follow bool, stream capsulev1.WorkloadService_LogsServer) error {
+// follow is true and r returns EOF, checks shouldStop (if provided) to
+// see if the source has gone permanently quiet — workload stopped,
+// failed, or deleted — and exits cleanly if so; otherwise sleeps
+// briefly and retries so we tail file-backed sources. Without
+// shouldStop, follow loops until the client cancels.
+func streamReaderToLogs(ctx context.Context, r io.Reader, follow bool, shouldStop func() bool, stream capsulev1.WorkloadService_LogsServer) error {
 	buf := make([]byte, 32*1024)
 	for {
 		n, rerr := r.Read(buf)
@@ -155,6 +202,9 @@ func streamReaderToLogs(ctx context.Context, r io.Reader, follow bool, stream ca
 		}
 		if rerr == io.EOF {
 			if !follow {
+				return nil
+			}
+			if shouldStop != nil && shouldStop() {
 				return nil
 			}
 			select {

@@ -19,15 +19,17 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	WorkloadService_Apply_FullMethodName   = "/capsule.v1.WorkloadService/Apply"
-	WorkloadService_Get_FullMethodName     = "/capsule.v1.WorkloadService/Get"
-	WorkloadService_List_FullMethodName    = "/capsule.v1.WorkloadService/List"
-	WorkloadService_Delete_FullMethodName  = "/capsule.v1.WorkloadService/Delete"
-	WorkloadService_Logs_FullMethodName    = "/capsule.v1.WorkloadService/Logs"
-	WorkloadService_Exec_FullMethodName    = "/capsule.v1.WorkloadService/Exec"
-	WorkloadService_Restart_FullMethodName = "/capsule.v1.WorkloadService/Restart"
-	WorkloadService_Stop_FullMethodName    = "/capsule.v1.WorkloadService/Stop"
-	WorkloadService_Start_FullMethodName   = "/capsule.v1.WorkloadService/Start"
+	WorkloadService_Apply_FullMethodName    = "/capsule.v1.WorkloadService/Apply"
+	WorkloadService_Get_FullMethodName      = "/capsule.v1.WorkloadService/Get"
+	WorkloadService_List_FullMethodName     = "/capsule.v1.WorkloadService/List"
+	WorkloadService_Delete_FullMethodName   = "/capsule.v1.WorkloadService/Delete"
+	WorkloadService_Logs_FullMethodName     = "/capsule.v1.WorkloadService/Logs"
+	WorkloadService_Exec_FullMethodName     = "/capsule.v1.WorkloadService/Exec"
+	WorkloadService_Restart_FullMethodName  = "/capsule.v1.WorkloadService/Restart"
+	WorkloadService_Stop_FullMethodName     = "/capsule.v1.WorkloadService/Stop"
+	WorkloadService_Start_FullMethodName    = "/capsule.v1.WorkloadService/Start"
+	WorkloadService_CopyTo_FullMethodName   = "/capsule.v1.WorkloadService/CopyTo"
+	WorkloadService_CopyFrom_FullMethodName = "/capsule.v1.WorkloadService/CopyFrom"
 )
 
 // WorkloadServiceClient is the client API for WorkloadService service.
@@ -61,6 +63,28 @@ type WorkloadServiceClient interface {
 	// Start sets desired state back to RUNNING; the reconciler picks it
 	// up and brings the workload back.
 	Start(ctx context.Context, in *WorkloadStartRequest, opts ...grpc.CallOption) (*WorkloadStartResponse, error)
+	// CopyTo streams a tar archive from the client into the workload at
+	// metadata.dest_path. The first client message MUST be
+	// WorkloadCopyToRequest.metadata; subsequent messages carry tar bytes.
+	// The server inspects dest_path and chooses between:
+	//   - "into" mode (extract entries directly under dest_path) when
+	//     dest_path ends with '/' OR is an existing directory inside the
+	//     workload — same as cp/scp/docker-cp behaviour.
+	//   - "as" mode (extract to a temp dir, then rename the single
+	//     top-level entry to dest_path) otherwise. Overwrites whatever
+	//     was at dest_path.
+	//
+	// Workload image must include /bin/sh, mkdir, mktemp, mv, ls, wc, and
+	// tar (universal in busybox/alpine/debian-derived images; not present
+	// in `scratch`). Handles files, directories, and symlinks via tar's
+	// normal semantics.
+	CopyTo(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WorkloadCopyToRequest, WorkloadCopyToResponse], error)
+	// CopyFrom tars up src_path inside the workload and streams the
+	// archive bytes back. Server runs `tar c -C <dirname(src_path)> --
+	// <basename(src_path)>`. The archive contains a single top-level
+	// entry (regular file or directory) named basename(src_path); the
+	// client is responsible for any rename/extract behaviour.
+	CopyFrom(ctx context.Context, in *WorkloadCopyFromRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkloadCopyFromChunk], error)
 }
 
 type workloadServiceClient struct {
@@ -173,6 +197,38 @@ func (c *workloadServiceClient) Start(ctx context.Context, in *WorkloadStartRequ
 	return out, nil
 }
 
+func (c *workloadServiceClient) CopyTo(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[WorkloadCopyToRequest, WorkloadCopyToResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &WorkloadService_ServiceDesc.Streams[2], WorkloadService_CopyTo_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WorkloadCopyToRequest, WorkloadCopyToResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type WorkloadService_CopyToClient = grpc.ClientStreamingClient[WorkloadCopyToRequest, WorkloadCopyToResponse]
+
+func (c *workloadServiceClient) CopyFrom(ctx context.Context, in *WorkloadCopyFromRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[WorkloadCopyFromChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &WorkloadService_ServiceDesc.Streams[3], WorkloadService_CopyFrom_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WorkloadCopyFromRequest, WorkloadCopyFromChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type WorkloadService_CopyFromClient = grpc.ServerStreamingClient[WorkloadCopyFromChunk]
+
 // WorkloadServiceServer is the server API for WorkloadService service.
 // All implementations must embed UnimplementedWorkloadServiceServer
 // for forward compatibility.
@@ -204,6 +260,28 @@ type WorkloadServiceServer interface {
 	// Start sets desired state back to RUNNING; the reconciler picks it
 	// up and brings the workload back.
 	Start(context.Context, *WorkloadStartRequest) (*WorkloadStartResponse, error)
+	// CopyTo streams a tar archive from the client into the workload at
+	// metadata.dest_path. The first client message MUST be
+	// WorkloadCopyToRequest.metadata; subsequent messages carry tar bytes.
+	// The server inspects dest_path and chooses between:
+	//   - "into" mode (extract entries directly under dest_path) when
+	//     dest_path ends with '/' OR is an existing directory inside the
+	//     workload — same as cp/scp/docker-cp behaviour.
+	//   - "as" mode (extract to a temp dir, then rename the single
+	//     top-level entry to dest_path) otherwise. Overwrites whatever
+	//     was at dest_path.
+	//
+	// Workload image must include /bin/sh, mkdir, mktemp, mv, ls, wc, and
+	// tar (universal in busybox/alpine/debian-derived images; not present
+	// in `scratch`). Handles files, directories, and symlinks via tar's
+	// normal semantics.
+	CopyTo(grpc.ClientStreamingServer[WorkloadCopyToRequest, WorkloadCopyToResponse]) error
+	// CopyFrom tars up src_path inside the workload and streams the
+	// archive bytes back. Server runs `tar c -C <dirname(src_path)> --
+	// <basename(src_path)>`. The archive contains a single top-level
+	// entry (regular file or directory) named basename(src_path); the
+	// client is responsible for any rename/extract behaviour.
+	CopyFrom(*WorkloadCopyFromRequest, grpc.ServerStreamingServer[WorkloadCopyFromChunk]) error
 	mustEmbedUnimplementedWorkloadServiceServer()
 }
 
@@ -240,6 +318,12 @@ func (UnimplementedWorkloadServiceServer) Stop(context.Context, *WorkloadStopReq
 }
 func (UnimplementedWorkloadServiceServer) Start(context.Context, *WorkloadStartRequest) (*WorkloadStartResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Start not implemented")
+}
+func (UnimplementedWorkloadServiceServer) CopyTo(grpc.ClientStreamingServer[WorkloadCopyToRequest, WorkloadCopyToResponse]) error {
+	return status.Error(codes.Unimplemented, "method CopyTo not implemented")
+}
+func (UnimplementedWorkloadServiceServer) CopyFrom(*WorkloadCopyFromRequest, grpc.ServerStreamingServer[WorkloadCopyFromChunk]) error {
+	return status.Error(codes.Unimplemented, "method CopyFrom not implemented")
 }
 func (UnimplementedWorkloadServiceServer) mustEmbedUnimplementedWorkloadServiceServer() {}
 func (UnimplementedWorkloadServiceServer) testEmbeddedByValue()                         {}
@@ -406,6 +490,24 @@ func _WorkloadService_Start_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkloadService_CopyTo_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(WorkloadServiceServer).CopyTo(&grpc.GenericServerStream[WorkloadCopyToRequest, WorkloadCopyToResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type WorkloadService_CopyToServer = grpc.ClientStreamingServer[WorkloadCopyToRequest, WorkloadCopyToResponse]
+
+func _WorkloadService_CopyFrom_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WorkloadCopyFromRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(WorkloadServiceServer).CopyFrom(m, &grpc.GenericServerStream[WorkloadCopyFromRequest, WorkloadCopyFromChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type WorkloadService_CopyFromServer = grpc.ServerStreamingServer[WorkloadCopyFromChunk]
+
 // WorkloadService_ServiceDesc is the grpc.ServiceDesc for WorkloadService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -453,6 +555,16 @@ var WorkloadService_ServiceDesc = grpc.ServiceDesc{
 			Handler:       _WorkloadService_Exec_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "CopyTo",
+			Handler:       _WorkloadService_CopyTo_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "CopyFrom",
+			Handler:       _WorkloadService_CopyFrom_Handler,
+			ServerStreams: true,
 		},
 	},
 	Metadata: "capsule/v1/workload.proto",
