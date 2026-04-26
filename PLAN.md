@@ -15,7 +15,12 @@ Walk this checklist top-to-bottom on a running capsule and every item is a green
 - **Storage substrate** — `/perm` is a plain LV in the capsule VG; user volumes are thin LVs in the sibling `thinpool`. VG is initialized on first boot if the PERM partition is blank. (VM payload disks are still flatten-to-ext4 today; unifying them into the thin pool is tracked in PLAN §4.)
 - **Lifecycle** — `workload stop / start / restart`; `desired_state=STOPPED` persists across capsule reboots.
 - **Logs + Exec** — container workloads via containerd; MicroVM workloads via the vsock agent (`capsule.v1.GuestAgent`). Same `capsulectl` commands, kind-transparent.
+- **`workload cp`** — scp-style file/directory copy in and out of containers and MicroVMs (kubectl-style tar-pipe through Exec; see "Gotchas" below for the rewrite tracked).
 - **Persistence** — SQLite at `/perm/state.db`. Workloads + volumes survive capsule reboots.
+- **A/B OS updates** — `capsulectl capsule update push <bundle.tar>` streams a new rootfs+kernel+initramfs to the inactive slot, GRUB flips active, capsule reboots; tentative-commit on first successful boot, auto-rollback to the known-good slot on health failure. `update confirm` locks it in.
+- **Breakglass / debug** — `capsulectl capsule debug` deploys a privileged container with host PID + bind-mounted `/dev` + `/sys` + `/perm` + `/sbin`/`/usr/sbin`/`/usr/bin`, drops you into an interactive shell, cleans up on exit (or `--keep`).
+- **System introspection** — `capsulectl capsule info` (hostname, kernel, uptime, CPU, memory, boot disk, thinpool fill %), `capsulectl capsule logs -f` (tails `capsuled`'s own slog over gRPC, no SSH needed).
+- **Real hardware** — boots end-to-end on Beelink (Intel Jasper Lake) with UEFI, AHCI/SATA M.2 SSDs, and the linux-lts 6.18 kernel. Same image boots under QEMU.
 
 ## Next (in rough priority order)
 
@@ -31,23 +36,11 @@ Today `runtime/microvm/firecracker/driver.go` launches the `firecracker` binary 
 
 For single-tenant homelab the current setup is fine. This matters most if/when we run untrusted workloads, multi-tenant, or compliance-adjacent workloads. Not a rewrite — swap `fc.VMCommandBuilder{}.WithBin(...)` for the jailer path and configure `fc.Config.JailerCfg`. ~1 day of work.
 
-### 1. Phase 3 — A/B OS updates
-
-The big missing milestone before Capsule is usable without physical access.
-
-- Two rootfs slots (`SLOT_A`, `SLOT_B`) — currently only `SLOT_A` (partition 2). Add SLOT_B as partition 3, bump PERM to partition 4.
-- Bootloader selector — a file on the EFI partition (or a syslinux default) says which slot to boot.
-- `CapsuleService.UpdateOS` streaming RPC — receives a new rootfs squashfs/ext4, writes to inactive slot, sets `next_boot=inactive` + `tentative=1`, reboots.
-- Tentative-flag rollback — on first successful boot in a new slot, `capsuled` clears `tentative`. If capsule fails to come up healthy before the bootloader retry countdown, it falls back to the known-good slot.
-- `capsulectl capsule update push <rootfs.sqsh>` round-trip.
-
-Probably 1-2 days of implementation + partition-layout surgery in `pack.sh`.
-
-### 2. Resource limits on MicroVMs
+### 1. Resource limits on MicroVMs
 
 Expose `resources: { cpuMillis, memoryMib, pidsMax }` in `MicroVMSpec`. Translate to `linux.resources` in the OCI config `capsule-guest` writes. runc already enforces. Kubernetes-style limits without the indirection.
 
-### 3. mTLS bootstrap
+### 2. mTLS bootstrap
 
 Today `:50000` is plaintext gRPC. For anything on a real network:
 - `capsuled` on first boot generates a cert at `/perm/tls/`, prints its SHA-256 fingerprint on the serial console.
@@ -56,7 +49,7 @@ Today `:50000` is plaintext gRPC. For anything on a real network:
 
 Matches Talos's model. ~half-day.
 
-### 4. Unify VM payload disks with the LVM thin pool
+### 3. Unify VM payload disks with the LVM thin pool
 
 **Natural follow-up to the LVM thin migration** — the user-volume half landed and was verified end-to-end on the VPS; the VM-payload half was explicitly deferred because of a containerd/LVM ownership clash documented below. Pick this up when you're next in the storage code; ~2 days of work on top of the groundwork already in place.
 
@@ -66,7 +59,7 @@ Blocker: containerd's devmapper snapshotter wants to own a thin pool's device-id
 
 Scope: rework `boot/boot_linux.go:initializeCapsuleVG` to create raw `thinmeta`/`thindata` LVs and then `dmsetup create capsule-thinpool` over them. Re-enable devmapper as default snapshotter in `image/etc/containerd-config.toml`. Revert `runtime/microvm/firecracker/image.go:preparePayloadDisk` to the snapshot-prepare path (git history has the version — the commit that this note first appeared in also contains the snapshot-based implementation that was reverted). Re-verify end-to-end on the VPS with two identical alpine VMs: the second should boot under 5 s and `lvs` should show the thin pool dedup'ing extents.
 
-### 5. Volume data lifecycle (builds on LVM thin)
+### 4. Volume data lifecycle (builds on LVM thin)
 
 Now that `/perm` is an LVM thin pool and every volume is a thin LV, snapshot/backup/migration is mostly plumbing over existing LVM primitives. Rough order:
 
@@ -74,29 +67,29 @@ Now that `/perm` is an LVM thin pool and every volume is a thin LV, snapshot/bac
 - **Phase C — Offline export/import.** `capsulectl volume export <vol> [--snapshot]` → snapshot then stream `dd | zstd` to stdout or an image file. Matching `volume import <name> <file>`. Covers the 90% "back this up somewhere" case — no new daemons, just shell-out pipelines.
 - **Phase D — Cross-capsule live migration (dm-clone + iSCSI).** Source exports the snapshot as an iSCSI LUN; destination stacks `dm-clone` over an empty LV with the iSCSI export as the remote source. VM boots immediately on the destination; blocks hydrate in the background. DISCARD pass-through on the guest short-circuits empty space. This is fly.io's machine-migration mechanism. ~2-3 weeks of real work, wait until there's actually a second capsule to migrate between.
 
-### 6. Low-priority cleanup
+### 5. Low-priority cleanup
 
 Accumulated lint/dead code spotted in passing. Batch into a single cleanup PR when someone's in the area:
 - `runtime/container/driver.go` — unused `errNotFound` sentinel near EOF; unused `_ = strings.ToLower` import-suppression hack above it.
 - `boot/boot_linux.go:38` — `initPlatform(ctx)` takes a `context.Context` that's no longer used; either use it or drop it.
 - `boot/boot_linux.go:279` — switch `strings.Split` → `strings.SplitSeq` per analyzer (Go 1.25+ perf nit).
 
-### 7. CLI polish
+### 6. CLI polish
 
 - `capsulectl workload list` should show declared port mappings (today they're only in `workload get`).
 - `capsulectl workload get` could print a human-friendly summary on top of the JSON.
 - `capsulectl volume mount <name> <path>` — mount a volume LV on the capsule shell for inspection without a workload.
 - `--wait` flag on `apply` / `start` / `restart` — block until phase=Running.
 
-### 8. Fleet / multi-capsule CLI (Phase 5)
+### 7. Fleet / multi-capsule CLI
 
 `capsulectl --capsule a.example.com,b.example.com workload list` — sequential fan-out, tabled output. `~/.config/capsule/config.yaml` with named capsules. Not a cluster yet, just fleet-of-identicals.
 
-### 9. Alternate MicroVM backends
+### 8. Alternate MicroVM backends
 
 Reserved slots in `MicroVMBackend`: `SMOLVM`, `QEMU`. Adding a QEMU driver unlocks **virtiofs** for volume sharing (if we ever want it) and **PCI passthrough** (for GPU/NIC workloads on real hardware).
 
-### 10. Prebuilt capsule-debug image
+### 9. Prebuilt capsule-debug image
 
 `capsulectl capsule debug` currently uses `alpine:3.20` and tells the operator to `apk add lvm2 e2fsprogs iptables iproute2` once they're inside. That works (lvm2 etc. happily talk to the host's LVM via the bind-mounted /dev + /sys + /perm) but adds 5–10 seconds to the first session and needs network access to dl-cdn.alpinelinux.org. Replace with a small purpose-built image we publish to a registry — `ghcr.io/<org>/capsule-debug:<version>` — with the toolchain baked in: `lvm2`, `e2fsprogs`, `iptables`, `iproute2`, `util-linux`, `blkid`, `strace`, `tcpdump`, `lsof`, plus host bin compatibility (the bind-mounted host /sbin/lvs etc. work directly when the image's libdir matches Alpine's). Make the default image override-able with `--image` so operators can use their own. Keep the alpine fallback documented for air-gapped environments.
 
@@ -106,7 +99,6 @@ Things that currently work but are brittle, hacky, or "good enough for now."
 
 ### Networking
 
-- **Capsule hostname** is hardcoded to `capsule` in `image/etc/hostname`. Needs to be set per-capsule at first boot (read a MAC-derived default, or fetch from a `/perm/capsule/hostname` if present).
 - **VM IP allocation** is hash-of-workload-name → `172.20.254.X`, X = `(hash % 252) + 2`. Collisions possible above ~20 VMs. Swap for a real IPAM that tracks allocations in sqlite.
 - **MASQUERADE is a blanket rule** on all traffic leaving the capsule. Fine for homelab; needs narrowing if Capsule ever lives on a shared L2.
 - **Port mapping doesn't consider conflicts.** Two VMs both declaring `hostPort: 8080` will both install DNAT rules; whichever got there first wins. Validate at Apply time.
@@ -143,7 +135,6 @@ Things that currently work but are brittle, hacky, or "good enough for now."
 
 - **No metrics.** No Prometheus endpoint, no `capsulectl capsule stats`. Worth adding once the fleet CLI exists.
 - **`capsulectl workload events`** — the reconciler could write a rolling event log (`applied → pulling → starting → running`) visible to operators.
-- **Structured logs exist on the capsule serial console only.** A `CapsuleService.StreamLogs` RPC would let `capsulectl capsule logs -f` tail without SSH.
 
 ### Security
 
