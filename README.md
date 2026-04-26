@@ -48,4 +48,4 @@ See [PLAN.md](./PLAN.md) for what's next and the known gotchas.
 
 ## License
 
-TBD.
+[Apache License 2.0](./LICENSE) — © 2026 Aaron Ogle.
