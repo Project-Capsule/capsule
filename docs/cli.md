@@ -1,0 +1,155 @@
+# `capsulectl` reference
+
+Operator CLI. One binary, one capsule per invocation.
+
+## Connecting
+
+`capsulectl` reads `CAPSULE_HOST=host:port` from the environment. Pass `--capsule host:port` on the command line to override.
+
+```sh
+export CAPSULE_HOST=192.168.10.138:50000
+capsulectl capsule info
+# or
+capsulectl --capsule localhost:50000 capsule info
+```
+
+If neither is set, the CLI defaults to `localhost:50000`.
+
+## Verbs
+
+```
+capsulectl [--capsule host:port] apply -f <manifest.yaml>
+capsulectl [--capsule host:port] capsule info
+capsulectl [--capsule host:port] capsule logs [-f] [-n N]
+capsulectl [--capsule host:port] capsule update push <bundle.tar> [--auto-confirm=N]
+capsulectl [--capsule host:port] capsule update confirm
+capsulectl [--capsule host:port] capsule debug [-i <image>] [--keep] [-- <cmd> [args...]]
+capsulectl [--capsule host:port] workload list
+capsulectl [--capsule host:port] workload get <name>
+capsulectl [--capsule host:port] workload delete <name>
+capsulectl [--capsule host:port] workload restart <name>
+capsulectl [--capsule host:port] workload stop <name>
+capsulectl [--capsule host:port] workload start <name>
+capsulectl [--capsule host:port] workload logs [-f] [-n N] [--serial] <name>
+capsulectl [--capsule host:port] workload exec [-t] <name> -- <cmd> [args...]
+capsulectl [--capsule host:port] volume create [--size 10GiB] <name>
+capsulectl [--capsule host:port] volume list
+capsulectl [--capsule host:port] volume get <name>
+capsulectl [--capsule host:port] volume delete [--force] <name>
+capsulectl [--capsule host:port] volume resize <name> <size>
+```
+
+## `apply -f`
+
+```sh
+capsulectl apply -f <manifest.yaml>
+```
+
+Universal apply. Dispatches by `kind:` in the manifest:
+
+- `Container`, `MicroVM` → workload apply (create or update).
+- `Volume` → volume create-if-missing, resize-if-smaller (grow only).
+
+Idempotent.
+
+## `capsule`
+
+### `capsule info`
+
+Prints identity + runtime snapshot:
+
+- hostname, kernel, arch, uptime
+- capsule version (build ID baked into the binary)
+- active slot (`slot_a` / `slot_b`)
+- pending slot + auto-rollback countdown, if mid-update
+- last committed version
+- local time + clock skew vs your laptop
+- memory, CPU, boot disk, LVM thin-pool usage
+
+### `capsule logs [-f] [-n N]`
+
+Stream `capsuled`'s own slog output (boot diagnostics, reconciler ticks, runtime driver events). `-f` to follow; `-n N` to start with the last N lines.
+
+This is the **host-side** log. For workload stdout/stderr use `workload logs`.
+
+### `capsule update push <bundle.tar> [--auto-confirm=N]`
+
+Streams an update bundle to the capsule. The capsule writes to the inactive slot, flips the GRUB one-shot, and reboots into the new slot in tentative mode (default 10 min deadline).
+
+Without `--auto-confirm`: returns once reboot is scheduled. You verify manually, then run `capsule update confirm`.
+
+With `--auto-confirm=N`: the CLI waits up to ~120 s for the capsule to come back, soaks for `N` seconds verifying it's still healthy, and sends `confirm` automatically.
+
+Bundle format: tar containing `VERSION`, `vmlinuz`, `initramfs`, `rootfs.sqsh`. Build with `make update-bundle`.
+
+See [updates.md](updates.md) for the full flow.
+
+### `capsule update confirm`
+
+Commits a tentative slot. Mounts the ESP, rewrites `grub.cfg`'s `set default=` line to point at the now-active slot, clears pending state. Subsequent reboots stay on this slot.
+
+### `capsule debug [-i <image>] [--keep] [-- <cmd> [args...]]`
+
+Spawns a privileged debug container on the capsule with host networking and a host root-fs bind. Useful for poking at LVM, iptables, mounts, etc. when something's gone sideways. `--keep` leaves the container running after the command exits; without it, the container is auto-deleted on exit.
+
+## `workload`
+
+Operates on `Container` and `MicroVM` workloads (volumes have their own verbs below).
+
+### `workload list`
+
+Table of all workloads + their phase (`Pending` / `Running` / `Stopped` / `Failed`).
+
+### `workload get <name>`
+
+Full spec + status JSON.
+
+### `workload logs [-f] [-n N] [--serial] <name>`
+
+Stream a workload's stdout/stderr. `-f` follows; `-n N` starts with last N lines.
+
+`--serial` (microVMs only) switches to the Firecracker serial console — kernel boot, `capsule-guest`, early failures. Use this when the guest agent is unreachable.
+
+### `workload exec [-t] <name> -- <cmd> [args...]`
+
+Exec into a running workload. `-t` allocates a TTY (use for interactive shells). Works for both containers and microVMs — for microVMs the exec is proxied through `capsule-guest` over vsock into the runc payload.
+
+```sh
+capsulectl workload exec -t alpine-shell -- /bin/sh
+```
+
+### `workload start | stop | restart | delete`
+
+`start` brings up a stopped workload. `stop` leaves the row in the DB. `restart` is `stop` + `start`. `delete` stops the workload and removes its row entirely.
+
+## `volume`
+
+### `volume create [--size 10GiB] <name>`
+
+Create a thin-provisioned LVM logical volume, format ext4, register it. Default size is `10GiB`.
+
+### `volume list`
+
+Table of all volumes + their size + attached workload (if any).
+
+### `volume get <name>`
+
+Full volume metadata.
+
+### `volume resize <name> <size>`
+
+`lvresize` + `resize2fs`. **Grow only** — shrinks are rejected. Volume must be detached (no workload mounted).
+
+### `volume delete [--force] <name>`
+
+Remove a volume. Default rejects if attached; `--force` first detaches the workload (if any) before deleting.
+
+## Sizes
+
+Anywhere a size is accepted (`--size`, `volume resize`, `Volume.size:`):
+
+- Bare `M` / `G` / `T` are treated as `MiB` / `GiB` / `TiB` (binary multiples).
+- Explicit `KiB` / `MiB` / `GiB` / `TiB` suffixes also work.
+- Plain integers are bytes.
+
+Examples: `2GiB`, `500M`, `1024`, `10G`.
