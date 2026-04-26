@@ -1,6 +1,10 @@
 # Capsule
 
-A minimal homelab OS that runs **containers and microVMs** under one declarative gRPC API.
+<p align="center">
+  <img width="1536" height="1024" alt="capsule-banner" src="https://github.com/user-attachments/assets/a7986449-4f0e-4097-b904-b62c50c46005" />
+</p>
+
+A minimal OS that runs **containers and microVMs** under one declarative gRPC API.
 
 Capsule is an immutable, single-binary-controlled Linux distribution. `capsuled` is PID 1 on every machine; it speaks gRPC on `:50000`. You `capsulectl apply -f workload.yaml` and the reconciler makes it so, whether the workload is a container or a Firecracker microVM.
 
