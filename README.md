@@ -11,6 +11,10 @@ It sits in a gap the existing ecosystem doesn't fill:
 - **k3OS** is archived.
 - **Flatcar / Bottlerocket / Fedora CoreOS / Kairos** are conventional immutable Linux distros, not single-binary-managed.
 
+## Lineage
+
+Spiritually closer to *original* CoreOS — the pre-Red-Hat era, when it was a scrappy, opinionated, immutable OS with A/B image updates and a small declarative surface — than to any of its descendants. Capsule is a single-host take on that idea: no clustering, no etcd, just SQLite and a reconciler that owns the box.
+
 ## Documentation
 
 The operator's manual lives in [`docs/`](./docs/README.md):
