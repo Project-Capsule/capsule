@@ -80,15 +80,18 @@ RUN set -eux \
              drivers/virtio/virtio_pci \
              drivers/block/virtio_blk \
              drivers/hwmon/hwmon \
+             drivers/scsi/scsi_common \
+             drivers/scsi/scsi_mod \
+             drivers/scsi/sd_mod \
+             drivers/ata/libata \
+             drivers/ata/libahci \
+             drivers/ata/ahci \
              drivers/nvme/host/nvme-core \
              drivers/nvme/host/nvme \
              drivers/usb/common/usb-common \
              drivers/usb/core/usbcore \
              drivers/usb/host/xhci-hcd \
              drivers/usb/host/xhci-pci \
-             drivers/scsi/scsi_common \
-             drivers/scsi/scsi_mod \
-             drivers/scsi/sd_mod \
              drivers/usb/storage/usb-storage \
              drivers/usb/storage/uas \
              fs/squashfs/squashfs \

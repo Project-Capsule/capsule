@@ -42,6 +42,7 @@ mount -t devtmpfs -o nosuid,mode=0755      devtmpfs /dev
 # Loading order:
 #   virtio + virtio_ring + virtio_pci_*       virtio bus + helpers + bus driver
 #   virtio_blk                                virtio block disks (QEMU/VPS)
+#   libata + libahci + ahci                   AHCI SATA controllers (Beelink M.2 SATA, generic SATA)
 #   nvme_core + nvme                          NVMe block disks (Beelink, most modern hw)
 #   squashfs / overlay                        rootfs filesystems (always needed)
 #
@@ -61,15 +62,18 @@ for m in drivers/virtio/virtio_ring \
          drivers/virtio/virtio_pci \
          drivers/block/virtio_blk \
          drivers/hwmon/hwmon \
+         drivers/scsi/scsi_common \
+         drivers/scsi/scsi_mod \
+         drivers/scsi/sd_mod \
+         drivers/ata/libata \
+         drivers/ata/libahci \
+         drivers/ata/ahci \
          drivers/nvme/host/nvme-core \
          drivers/nvme/host/nvme \
          drivers/usb/common/usb-common \
          drivers/usb/core/usbcore \
          drivers/usb/host/xhci-hcd \
          drivers/usb/host/xhci-pci \
-         drivers/scsi/scsi_common \
-         drivers/scsi/scsi_mod \
-         drivers/scsi/sd_mod \
          drivers/usb/storage/usb-storage \
          drivers/usb/storage/uas \
          fs/squashfs/squashfs \
