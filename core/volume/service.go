@@ -111,6 +111,7 @@ func (s *Service) Create(ctx context.Context, name string, sizeMiB uint64) (*cap
 		_ = removeVolumeLV(name)
 		return nil, err
 	}
+	slog.Info("volume create", "name", name, "size_mib", sizeMiB)
 	return v, nil
 }
 
@@ -158,7 +159,11 @@ func (s *Service) Delete(ctx context.Context, name string, force bool) error {
 	if err := removeVolumeLV(name); err != nil {
 		return fmt.Errorf("lvremove %s: %w", v.GetHostPath(), err)
 	}
-	return s.store.Volumes().Delete(ctx, name)
+	if err := s.store.Volumes().Delete(ctx, name); err != nil {
+		return err
+	}
+	slog.Info("volume delete", "name", name, "force", force)
+	return nil
 }
 
 // Resize grows an existing volume to newSizeMiB MiB. Grow-only; shrink
@@ -197,6 +202,7 @@ func (s *Service) Resize(ctx context.Context, name string, newSizeMiB uint64) (*
 	if err := resizeVolumeLV(name, newSizeMiB); err != nil {
 		return nil, err
 	}
+	slog.Info("volume resize", "name", name, "from_mib", current/1024/1024, "to_mib", newSizeMiB)
 	s.populateDerived(ctx, v)
 	return v, nil
 }

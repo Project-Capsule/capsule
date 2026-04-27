@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"regexp"
 
@@ -69,6 +70,11 @@ func (s *Service) Apply(ctx context.Context, w *capsulev1.Workload) (*capsulev1.
 	if err := s.store.Workloads().Put(ctx, merged); err != nil {
 		return nil, err
 	}
+	op := "update"
+	if existing == nil {
+		op = "create"
+	}
+	slog.Info("workload apply", "name", merged.GetName(), "kind", workloadKindString(merged.GetKind()), "op", op, "image", workloadImage(merged))
 	s.notifyChange()
 	return merged, nil
 }
@@ -128,6 +134,7 @@ func (s *Service) Delete(ctx context.Context, name string) error {
 	if err := s.store.Workloads().Delete(ctx, name); err != nil {
 		return err
 	}
+	slog.Info("workload delete", "name", name, "kind", workloadKindString(kind))
 	s.notifyChange()
 	return nil
 }
@@ -226,6 +233,7 @@ func (s *Service) Restart(ctx context.Context, name string) error {
 			return err
 		}
 	}
+	slog.Info("workload restart", "name", name, "kind", workloadKindString(w.GetKind()))
 	s.notifyChange()
 	return nil
 }
@@ -252,6 +260,7 @@ func (s *Service) Stop(ctx context.Context, name string) error {
 			_ = s.driver.Remove(ctx, name)
 		}
 	}
+	slog.Info("workload stop", "name", name, "kind", workloadKindString(w.GetKind()))
 	s.notifyChange()
 	return nil
 }
@@ -274,6 +283,7 @@ func (s *Service) Start(ctx context.Context, name string) error {
 	if err := s.store.Workloads().Put(ctx, w); err != nil {
 		return err
 	}
+	slog.Info("workload start", "name", name, "kind", workloadKindString(w.GetKind()))
 	s.notifyChange()
 	return nil
 }
@@ -290,6 +300,31 @@ func (s *Service) SetStatus(ctx context.Context, name string, status *capsulev1.
 	}
 	w.Status = status
 	return s.store.Workloads().Put(ctx, w)
+}
+
+// workloadKindString returns a short kind label suitable for log key=value.
+func workloadKindString(k capsulev1.WorkloadKind) string {
+	switch k {
+	case capsulev1.WorkloadKind_WORKLOAD_KIND_CONTAINER:
+		return "container"
+	case capsulev1.WorkloadKind_WORKLOAD_KIND_MICRO_VM:
+		return "microvm"
+	default:
+		return "unknown"
+	}
+}
+
+// workloadImage returns the workload's image string, or "" for kinds
+// that don't carry one. Used as a log attribute.
+func workloadImage(w *capsulev1.Workload) string {
+	switch w.GetKind() {
+	case capsulev1.WorkloadKind_WORKLOAD_KIND_CONTAINER:
+		return w.GetContainer().GetImage()
+	case capsulev1.WorkloadKind_WORKLOAD_KIND_MICRO_VM:
+		return w.GetMicroVm().GetImage()
+	default:
+		return ""
+	}
 }
 
 // --- validation -------------------------------------------------------------
