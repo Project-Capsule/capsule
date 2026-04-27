@@ -37,6 +37,14 @@ PERM_IMG="$WORK/perm.ext4"
 UPDATE_TAR="$WORK/update.tar"
 
 PERM_SIZE_MIB="${PERM_SIZE_MIB:-2048}"
+# Slot size is FIXED, not dynamic. Once a capsule is installed, slot
+# partition offsets are frozen — growing them would shift PERM and
+# destroy the LVM PV. So pick a size with enough headroom for the next
+# several years of OS growth on day one. 2 GiB matches Talos's per-side
+# budget (after they bumped from 1 GiB in 1.11) and gives ~75% headroom
+# over today's ~1.1 GiB squashfs. To override at build time:
+#   SLOT_SIZE_MIB=3072 make image
+SLOT_SIZE_MIB="${SLOT_SIZE_MIB:-2048}"
 DISK_SIG_HEX="b1a570ff"
 
 [ -f "$ROOTFS_TAR" ] || { echo "pack.sh: missing $ROOTFS_TAR"; exit 1; }
@@ -74,13 +82,19 @@ if [ "${BUNDLE_ONLY:-0}" = "1" ]; then
   exit 0
 fi
 
-# ---- 3. size the slot partitions to fit the squashfs + headroom ------------
-# 50 MiB headroom so a future update whose squashfs grows a bit still fits
-# without re-partitioning. Both slots are sized identically.
-SLOT_BYTES=$(( SQSH_BYTES + 50 * 1024 * 1024 ))
-SLOT_MIB=$(( (SLOT_BYTES + 1024*1024 - 1) / (1024*1024) ))
+# ---- 3. validate squashfs fits in the fixed slot size ----------------------
+# Slot size is fixed (see SLOT_SIZE_MIB at the top). If the squashfs grew
+# past the slot, fail loud at build time — this is a hard ceiling, not a
+# warning, because every future update.tar built from this image will
+# refuse to apply on existing capsules with smaller slots.
+SLOT_MIB="$SLOT_SIZE_MIB"
 SLOT_BYTES=$(( SLOT_MIB * 1024 * 1024 ))
-echo "pack.sh: slot partition size = ${SLOT_MIB} MiB each (squashfs inside)"
+if [ "$SQSH_BYTES" -gt "$SLOT_BYTES" ]; then
+  echo "pack.sh: ERROR squashfs ${SQSH_BYTES} bytes > slot ${SLOT_BYTES} bytes (${SLOT_MIB} MiB)"
+  echo "pack.sh: bump SLOT_SIZE_MIB or shrink the rootfs"
+  exit 1
+fi
+echo "pack.sh: slot partition size = ${SLOT_MIB} MiB each (squashfs ${SQSH_BYTES} bytes, $(( 100 * SQSH_BYTES / SLOT_BYTES ))% full)"
 
 # ---- 4. PERM partition: preserve across rebuilds if possible --------------
 # PERM holds the LVM PV for VG "capsule": meta LV (mounted at /perm) +

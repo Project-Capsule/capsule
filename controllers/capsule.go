@@ -155,6 +155,8 @@ func (c *CapsuleController) UpdateOS(stream capsulev1.CapsuleService_UpdateOSSer
 		switch {
 		case stderrors.Is(err, coreupdate.ErrChecksumMismatch):
 			return status.Error(codes.InvalidArgument, err.Error())
+		case stderrors.Is(err, coreupdate.ErrBundleTooLarge):
+			return status.Error(codes.FailedPrecondition, err.Error())
 		default:
 			return status.Error(codes.Internal, err.Error())
 		}

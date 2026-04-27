@@ -21,12 +21,14 @@ A bootable Capsule disk is MBR-partitioned with **four** partitions. Disk signat
 
 | # | Type   | Label/format         | Size       | Purpose                              |
 |---|--------|----------------------|------------|--------------------------------------|
-| 1 | 0xEF   | FAT32 `CAPSULEBOOT`  | ~256 MiB   | EFI System Partition. GRUB EFI binary, `grub.cfg`, both slots' `vmlinuz_*` + `initramfs_*`. |
-| 2 | raw    | squashfs (`slot_a`)  | ~200 MiB   | Rootfs A. Compressed, immutable.     |
-| 3 | raw    | squashfs (`slot_b`)  | ~200 MiB   | Rootfs B. Compressed, immutable.     |
+| 1 | 0xEF   | FAT32 `CAPSULEBOOT`  | 256 MiB    | EFI System Partition. GRUB EFI binary, `grub.cfg`, both slots' `vmlinuz_*` + `initramfs_*`. |
+| 2 | raw    | squashfs (`slot_a`)  | 2 GiB      | Rootfs A. Compressed, immutable.     |
+| 3 | raw    | squashfs (`slot_b`)  | 2 GiB      | Rootfs B. Compressed, immutable.     |
 | 4 | 0x8E   | LVM2 PV (`capsule`)  | remainder  | Thin pool backs `/perm` + every user volume + containerd snapshots. |
 
 Slot partitions hold a raw squashfs image written directly to the partition (no filesystem wrapper). Updates `dd` a new squashfs onto the inactive slot.
+
+Slot size is **fixed at install time** (default 2 GiB, override with `SLOT_SIZE_MIB=N make image`) — once a capsule is installed, the slot offsets are frozen. Growing them would shift PERM and destroy the LVM PV. Talos took the same approach (fixed 2 GiB BOOT after pain at 1 GiB); gokrazy uses 500 MiB. The 2 GiB ceiling gives ~75% headroom over today's ~1.1 GiB squashfs. `pack.sh` refuses to build if the squashfs would overflow the slot, and `UpdateOS` refuses to apply a bundle whose `rootfs.sqsh` is larger than the destination slot — to apply such a bundle you'd reinstall with a bigger `SLOT_SIZE_MIB`.
 
 The LVM volume group `capsule` contains:
 

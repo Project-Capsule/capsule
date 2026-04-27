@@ -42,6 +42,9 @@ var (
 	// ErrChecksumMismatch is returned by ReceiveBundle when the streamed
 	// bytes don't hash to the metadata's sha256.
 	ErrChecksumMismatch = errors.New("update: bundle sha256 mismatch")
+	// ErrBundleTooLarge is returned by ReceiveBundle when the bundle's
+	// rootfs.sqsh would not fit in the inactive slot partition.
+	ErrBundleTooLarge = errors.New("update: bundle too large for slot")
 )
 
 // DefaultDeadline is how long capsuled waits for a Confirm before it
@@ -270,8 +273,21 @@ func (s *Service) ReceiveBundle(ctx context.Context, expectSize uint64, expectSH
 				return "", "", err
 			}
 		case "rootfs.sqsh":
+			// Pre-flight: refuse to even start the dd if the squashfs is
+			// bigger than the inactive slot. Otherwise io.Copy would write
+			// up to the partition boundary and EIO partway through, leaving
+			// a half-written slot. Slot sizes are frozen at install time
+			// (see image/pack.sh SLOT_SIZE_MIB) — the only fix is reinstall.
+			slotBytes, err := blockDeviceSize(inactiveDev)
+			if err != nil {
+				return "", "", fmt.Errorf("size of %s: %w", inactiveDev, err)
+			}
+			if hdr.Size > slotBytes {
+				return "", "", fmt.Errorf("%w: rootfs.sqsh %d bytes > slot %s capacity %d bytes; bump SLOT_SIZE_MIB and reinstall to apply this update",
+					ErrBundleTooLarge, hdr.Size, inactiveDev, slotBytes)
+			}
 			slog.Info("streaming rootfs.sqsh to inactive slot",
-				"slot", nextSlot, "device", inactiveDev, "size", hdr.Size)
+				"slot", nextSlot, "device", inactiveDev, "size", hdr.Size, "slot_bytes", slotBytes)
 			if err := writeBlockDevice(inactiveDev, tr); err != nil {
 				return "", "", fmt.Errorf("stream rootfs to %s: %w", inactiveDev, err)
 			}
@@ -347,6 +363,18 @@ func writeFile(path string, r io.Reader) error {
 		return err
 	}
 	return f.Sync()
+}
+
+// blockDeviceSize returns the byte length of a block device. os.Stat
+// reports 0 for block specials, so seek-to-end is the cheap portable
+// trick (works on Linux for any seekable fd).
+func blockDeviceSize(devPath string) (int64, error) {
+	f, err := os.OpenFile(devPath, os.O_RDONLY, 0)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return f.Seek(0, io.SeekEnd)
 }
 
 // writeBlockDevice opens devPath and copies bytes from r, fsync at end.
