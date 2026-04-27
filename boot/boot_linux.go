@@ -72,11 +72,6 @@ func initPlatform(ctx context.Context) (Result, error) {
 		slog.Info("active slot", "slot", res.ActiveSlot)
 	}
 
-	// Docker strips /etc/hostname during image build, so we keep our copy
-	// at /etc/capsule/hostname and install it onto the kernel here.
-	if err := setHostnameFromFile("/etc/capsule/hostname"); err != nil {
-		slog.Warn("failed to set hostname", "err", err)
-	}
 	if err := installResolvConf("/etc/capsule/resolv.conf", "/etc/resolv.conf"); err != nil {
 		slog.Warn("failed to install resolv.conf", "err", err)
 	}
@@ -105,6 +100,13 @@ func initPlatform(ctx context.Context) (Result, error) {
 		slog.Error("failed to mount /perm", "err", err)
 	} else {
 		res.MountedPerm = true
+	}
+
+	// Hostname must come after mountPerm (so /perm/capsule/hostname is
+	// readable if the operator set it) and after loadBridgeModules (so the
+	// MAC-derived fallback can see the real ethernet, not just lo).
+	if err := applyResolvedHostname(res.MountedPerm); err != nil {
+		slog.Warn("failed to set hostname", "err", err)
 	}
 
 	return res, nil
@@ -533,25 +535,99 @@ func firstEthIfaceWait(timeout time.Duration) (string, error) {
 	}
 }
 
-// setHostnameFromFile reads a single line from path and calls sethostname(2).
-// Trims trailing whitespace; missing file is not an error.
-func setHostnameFromFile(path string) error {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	name := strings.TrimSpace(string(b))
+// PermHostnameFile is the operator-settable hostname override. Lives on
+// /perm so it survives OS A/B updates. A SetHostname RPC (future) writes
+// here; for now an operator can drop a single-line file via `capsule
+// debug` to rename the box across reboots.
+const PermHostnameFile = "/perm/capsule/hostname"
+
+// applyResolvedHostname picks a hostname using this priority:
+//  1. /perm/capsule/hostname (operator-set, persistent)
+//  2. capsule-<6 hex chars of the first non-loopback NIC MAC>
+//     (deterministic per box: same hardware → same name across reboots)
+//  3. "capsule" (last-resort static fallback)
+//
+// permMounted=false skips step 1 — we never block on /perm being there
+// (a failed VG activation must not also leave the box nameless).
+func applyResolvedHostname(permMounted bool) error {
+	name := resolveHostname(permMounted)
 	if name == "" {
 		return nil
 	}
 	if err := unix.Sethostname([]byte(name)); err != nil {
-		return err
+		return fmt.Errorf("sethostname %q: %w", name, err)
 	}
 	slog.Info("hostname set", "hostname", name)
 	return nil
+}
+
+func resolveHostname(permMounted bool) string {
+	if permMounted {
+		if name, ok := readHostnameFile(PermHostnameFile); ok {
+			return name
+		}
+	}
+	if name := macDerivedHostname(); name != "" {
+		return name
+	}
+	if name, ok := readHostnameFile("/etc/capsule/hostname"); ok {
+		return name
+	}
+	return "capsule"
+}
+
+func readHostnameFile(path string) (string, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	name := strings.TrimSpace(string(b))
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+// macDerivedHostname returns "capsule-<6hex>" using the last 3 octets of
+// the first non-loopback netdev's MAC (alphabetical name order — stable
+// per box). Returns "" if no eligible NIC is up yet.
+func macDerivedHostname() string {
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return ""
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Name() == "lo" {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	// ReadDir returns lexical order on Linux, but be explicit — we rely on
+	// it for "stable per box" across kernel revs.
+	for i := 1; i < len(names); i++ {
+		for j := i; j > 0 && names[j] < names[j-1]; j-- {
+			names[j], names[j-1] = names[j-1], names[j]
+		}
+	}
+	for _, n := range names {
+		mac, err := os.ReadFile(filepath.Join("/sys/class/net", n, "address"))
+		if err != nil {
+			continue
+		}
+		s := strings.TrimSpace(string(mac))
+		// Skip all-zero MACs (uninitialized virtual interfaces) — they
+		// would collide across boxes.
+		if s == "" || s == "00:00:00:00:00:00" {
+			continue
+		}
+		parts := strings.Split(s, ":")
+		if len(parts) != 6 {
+			continue
+		}
+		return "capsule-" + strings.ToLower(parts[3]+parts[4]+parts[5])
+	}
+	return ""
 }
 
 // installResolvConf copies src into dst. Like hostname, /etc/resolv.conf is

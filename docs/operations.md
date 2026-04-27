@@ -82,3 +82,17 @@ Once the thinpool has grown and started using the new PV extents, rollback isn't
 ### When this should be a real verb
 
 This sequence is mechanical enough that it ought to be `capsulectl capsule grow-disk` (or similar). Punted because (a) it's a one-time operation per machine in practice and (b) doing it safely from inside `capsuled` itself is awkward — `capsuled` is the thing using `/perm`. The breakglass path here is good enough until that changes.
+
+## Set the capsule hostname
+
+By default the hostname is `capsule-<6hex>`, derived from the last 3 octets of the first non-loopback NIC's MAC. Stable across reboots on the same hardware. To pin a friendly name:
+
+```sh
+capsulectl capsule debug -i docker.io/library/alpine:3.23 -- /bin/sh -c '
+echo "homelab-east" > /perm/capsule/hostname
+'
+# Takes effect on next boot. To apply now without a reboot:
+capsulectl capsule debug -- hostname homelab-east
+```
+
+`/perm/capsule/hostname` lives on `/perm`, so it survives A/B OS updates. Delete the file to revert to the MAC-derived default.
