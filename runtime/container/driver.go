@@ -62,6 +62,11 @@ type Driver struct {
 // whether to run CNI teardown without needing external state.
 const BridgeLabel = "capsule.network/mode"
 
+// SpecHashLabel stores runtime.SpecHash on the running container so
+// EnsureRunning can detect spec drift (operator re-applied with a new
+// image / env / etc.) and recreate.
+const SpecHashLabel = "capsule.spec/hash"
+
 // New dials containerd at socket and returns a Driver. Caller must Close
 // when done.
 func New(socket string) (*Driver, error) {
@@ -92,20 +97,45 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 	name := w.GetName()
 	spec := w.GetContainer()
 
-	// 1. Already running?
+	desiredHash, err := runtime.SpecHash(w)
+	if err != nil {
+		return err
+	}
+
+	// 1. Already running? Compare stored spec hash vs desired — if the
+	//    operator re-applied with changes, the running container's hash
+	//    label won't match and we tear down so the recreate path picks up
+	//    the new spec.
 	if existing, err := d.client.LoadContainer(ctx, name); err == nil {
+		info, _ := existing.Info(ctx)
+		runningHash := info.Labels[SpecHashLabel]
+		specChanged := runningHash != "" && runningHash != desiredHash
+
 		task, err := existing.Task(ctx, nil)
 		if err == nil {
 			status, err := task.Status(ctx)
 			if err == nil && status.Status == containerd.Running {
-				return nil // nothing to do
+				if !specChanged {
+					return nil // running and on the desired spec
+				}
+				slog.Info("container spec changed — recreating", "workload", name, "old_hash", runningHash, "new_hash", desiredHash)
+				// Use the full Remove so CNI/portmap/volume teardown
+				// happens; otherwise we'd leak network rules and mounts.
+				if err := d.Remove(parentCtx, name); err != nil {
+					return fmt.Errorf("remove stale container %q: %w", name, err)
+				}
+			} else {
+				// Task exists but isn't running — tear it down so we recreate.
+				_, _ = task.Delete(ctx, containerd.WithProcessKill)
+				if err := existing.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
+					return fmt.Errorf("delete stale container %q: %w", name, err)
+				}
 			}
-			// Task exists but is stopped — tear it down so we recreate.
-			_, _ = task.Delete(ctx, containerd.WithProcessKill)
-		}
-		// Container exists, task doesn't — delete and recreate to be safe.
-		if err := existing.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
-			return fmt.Errorf("delete stale container %q: %w", name, err)
+		} else {
+			// Container exists, task doesn't — delete and recreate to be safe.
+			if err := existing.Delete(ctx, containerd.WithSnapshotCleanup); err != nil {
+				return fmt.Errorf("delete stale container %q: %w", name, err)
+			}
 		}
 	} else if !errdefs.IsNotFound(err) {
 		return fmt.Errorf("load container %q: %w", name, err)
@@ -193,7 +223,8 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 		containerd.WithNewSnapshot(name+"-snapshot", image),
 		containerd.WithNewSpec(specOpts...),
 		containerd.WithContainerLabels(map[string]string{
-			BridgeLabel: networkModeLabel(spec.GetNetworkMode()),
+			BridgeLabel:   networkModeLabel(spec.GetNetworkMode()),
+			SpecHashLabel: desiredHash,
 		}),
 	}
 	_ = containerOpts // used below in the NewContainer call

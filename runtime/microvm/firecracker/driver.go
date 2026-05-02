@@ -113,13 +113,31 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 	}
 	name := w.GetName()
 
-	d.mu.Lock()
-	if _, ok := d.vms[name]; ok {
-		d.mu.Unlock()
-		// TODO: real liveness check via Firecracker API.
-		return nil
+	desiredHash, err := runtime.SpecHash(w)
+	if err != nil {
+		return err
 	}
+
+	d.mu.Lock()
+	_, alreadyTracked := d.vms[name]
 	d.mu.Unlock()
+	if alreadyTracked {
+		// Compare the on-disk spec hash to the desired one. If the operator
+		// re-applied with changes (image, env, mounts, ...), tear down so
+		// the recreate path picks up the new spec. Same Remove the operator
+		// would call — handles tap, port rules, vsock, payload disk, etc.
+		// Empty runningHash means "started by a pre-spec-hash build" —
+		// don't churn it; operator can `workload restart` to force.
+		runningHash := readSpecHash(filepath.Join(stateDir, name))
+		if runningHash == "" || runningHash == desiredHash {
+			// TODO: real liveness check via Firecracker API.
+			return nil
+		}
+		slog.Info("microvm spec changed — recreating", "workload", name, "old_hash", runningHash, "new_hash", desiredHash)
+		if err := d.Remove(parentCtx, name); err != nil {
+			return fmt.Errorf("remove stale vm %q: %w", name, err)
+		}
+	}
 
 	// Prepare per-VM state directory (tmpfs; recreated every run).
 	vmDir := filepath.Join(stateDir, name)
@@ -309,6 +327,14 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 	// Remove uses the same "capsule-vm:<name>" comment to find them.
 	if err := applyPortMappings(name, guestIP, spec.GetPorts()); err != nil {
 		slog.Warn("port mapping install failed", "workload", name, "err", err)
+	}
+
+	// Stash the spec hash so a later EnsureRunning can detect drift and
+	// recreate. Best-effort: if write fails we still mark the VM as
+	// tracked, just future drift detection won't fire (operator can
+	// `workload restart` to force).
+	if err := writeSpecHash(vmDir, desiredHash); err != nil {
+		slog.Warn("write spec hash", "workload", name, "err", err)
 	}
 
 	d.mu.Lock()
@@ -563,4 +589,22 @@ func runIP(args ...string) error {
 		return fmt.Errorf("ip %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// specHashFile is where each VM's runtime.SpecHash gets stashed so a
+// later EnsureRunning tick can detect spec drift after an operator
+// re-apply. Lives in vmDir alongside api.sock / vsock.uds and disappears
+// with the rest of that dir on Remove.
+const specHashFile = "spec.hash"
+
+func readSpecHash(vmDir string) string {
+	b, err := os.ReadFile(filepath.Join(vmDir, specHashFile))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func writeSpecHash(vmDir, hash string) error {
+	return os.WriteFile(filepath.Join(vmDir, specHashFile), []byte(hash), 0o644)
 }

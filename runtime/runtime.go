@@ -6,11 +6,45 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	capsulev1 "github.com/geekgonecrazy/capsule/models/capsule/v1"
 )
+
+// SpecHash returns a stable hex digest of the runtime-relevant spec for
+// w (Container or MicroVm sub-message). Drivers store this on each
+// container/VM at create time and compare against the desired hash on
+// every EnsureRunning — a mismatch means the operator re-applied with
+// changes (image bump, env edit, mount add, etc.) and the workload must
+// be torn down + recreated to match. Only the runtime-shaping fields
+// participate (proto.Marshal of the kind-specific spec); name, kind,
+// desired_state, and status are intentionally excluded.
+func SpecHash(w *capsulev1.Workload) (string, error) {
+	var msg proto.Message
+	switch w.GetKind() {
+	case capsulev1.WorkloadKind_WORKLOAD_KIND_CONTAINER:
+		msg = w.GetContainer()
+	case capsulev1.WorkloadKind_WORKLOAD_KIND_MICRO_VM:
+		msg = w.GetMicroVm()
+	default:
+		return "", fmt.Errorf("spec hash: unsupported kind %v", w.GetKind())
+	}
+	if msg == nil {
+		return "", fmt.Errorf("spec hash: workload %q has no spec", w.GetName())
+	}
+	b, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
+	if err != nil {
+		return "", fmt.Errorf("spec hash: marshal: %w", err)
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
 
 // Phase describes the observed lifecycle state of a runtime-managed workload.
 type Phase int
