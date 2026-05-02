@@ -20,6 +20,7 @@ import (
 
 	"github.com/geekgonecrazy/capsule/boot"
 	capsulev1 "github.com/geekgonecrazy/capsule/models/capsule/v1"
+	"github.com/geekgonecrazy/capsule/runtime/container"
 )
 
 // Paths baked into Capsule's rootfs.
@@ -31,11 +32,6 @@ const (
 	SharedKernel = "/usr/share/capsule/vmlinux"
 	SharedRootfs = "/usr/share/capsule/vm-shared.ext4"
 )
-
-// VMImageNamespace is the containerd namespace capsule uses for pulled OCI
-// images destined for microVMs. Kept distinct from "capsule" (the container
-// namespace) so a container image cache doesn't get mixed with VM images.
-const VMImageNamespace = "capsule-vm"
 
 // OCIPayload is the metadata capsule-guest needs to exec the image's
 // entrypoint after /dev/vdb is mounted. Sent over vsock as part of
@@ -69,7 +65,12 @@ func (d *Driver) preparePayloadDisk(parentCtx context.Context, w *capsulev1.Work
 	if err != nil {
 		return "", nil, err
 	}
-	ctx := namespaces.WithNamespace(parentCtx, VMImageNamespace)
+	// One containerd namespace ("capsule") for both container and VM images:
+	// the content store and snapshotters are global, and containers use
+	// devmapper while VMs use overlayfs (line below) — no collision possible.
+	// Using the same namespace means `capsulectl image push` lands somewhere
+	// VM workloads can actually find.
+	ctx := namespaces.WithNamespace(parentCtx, container.Namespace)
 
 	img, err := client.GetImage(ctx, ref)
 	if err != nil {
