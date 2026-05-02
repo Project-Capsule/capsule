@@ -40,6 +40,15 @@ type agent struct {
 
 	started  bool
 	watching bool // a goroutine is polling runc state + reaping exit
+
+	// volumeMounts holds the host-side mountpoints (e.g. "/oci/workspace")
+	// for every user volume StartPayload mounted. These are mounted
+	// OUTSIDE the runc namespace, so `runc delete` doesn't tear them down
+	// — Stop must explicitly umount them so ext4 commits its journal
+	// before the VM is killed. Without this, writes from the workload
+	// silently vanish: dirty pages drop on the floor when Firecracker is
+	// SIGTERM'd, and the next mounter sees the pre-write state.
+	volumeMounts []string
 }
 
 const (
@@ -162,6 +171,9 @@ func (a *agent) StartPayload(_ context.Context, req *capsulev1.StartPayloadReque
 			return nil, fmt.Errorf("mount %s -> %s: %w", dev, hostMP, err)
 		}
 		extraMounts = append(extraMounts, extraMount{src: hostMP, dst: mp, readOnly: vm.GetReadOnly()})
+		a.mu.Lock()
+		a.volumeMounts = append(a.volumeMounts, hostMP)
+		a.mu.Unlock()
 	}
 
 	cwd := req.GetWorkingDir()
@@ -470,7 +482,15 @@ func (a *agent) Exec(stream capsulev1.GuestAgent_ExecServer) error {
 	})
 }
 
-// Stop sends SIGTERM via runc, then SIGKILL after grace_seconds.
+// Stop sends SIGTERM via runc, then SIGKILL after grace_seconds, then
+// unmounts every user volume the payload had attached. The unmount step
+// is the data-safety boundary: ext4 commits its journal on umount(2),
+// and once umount returns the writes are durable on the underlying
+// virtio-blk device. Without it, the host's Remove path SIGTERMs
+// Firecracker moments later and the guest kernel's dirty pages — which
+// include freshly-extracted tarball contents, sqlite writes, etc. —
+// never make it back to the host's LV. Result: silent data loss visible
+// to the next mounter.
 func (a *agent) Stop(_ context.Context, req *capsulev1.StopRequest) (*capsulev1.StopResponse, error) {
 	a.mu.Lock()
 	if !a.started {
@@ -495,6 +515,28 @@ func (a *agent) Stop(_ context.Context, req *capsulev1.StopRequest) (*capsulev1.
 	}
 	_ = runRuncQuiet("kill", containerID, "KILL")
 	_ = runRuncQuiet("delete", "--force", containerID)
+
+	// Unmount user volumes in reverse order so a deeper mount comes off
+	// before a parent. syscall.Sync() afterward catches anything the
+	// kernel had outside the per-mount writeback (belt and braces — ext4
+	// umount already commits the journal).
+	a.mu.Lock()
+	mps := a.volumeMounts
+	a.volumeMounts = nil
+	a.started = false
+	a.mu.Unlock()
+	for i := len(mps) - 1; i >= 0; i-- {
+		if err := syscall.Unmount(mps[i], 0); err != nil {
+			// MNT_DETACH lets the kernel clean up after the last user
+			// (we just killed runc; nothing should be holding it now,
+			// but guard anyway). Failure here means a leaked mount in
+			// the dying VM — annoying but not data-losing on its own.
+			if err2 := syscall.Unmount(mps[i], syscall.MNT_DETACH); err2 != nil {
+				log.Printf("capsule-guest: umount %s: %v / %v", mps[i], err, err2)
+			}
+		}
+	}
+	syscall.Sync()
 	return &capsulev1.StopResponse{}, nil
 }
 
