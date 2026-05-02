@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package capsule.v1;
+
+// ImageService manages OCI images in the capsule's containerd image
+// store. Use it to push images that aren't available in any registry the
+// capsule can reach (private images, air-gapped builds, work-in-progress
+// images you haven't pushed anywhere yet) and to inspect what's already
+// cached on the capsule.
+service ImageService {
+  // List returns every image known to containerd in the `capsule`
+  // namespace — both registry-pulled and operator-pushed.
+  rpc List(ImageListRequest) returns (ImageListResponse);
+
+  // Push streams an OCI/docker-save tar archive from the operator into
+  // containerd's image store. The first client message MUST be
+  // ImagePushRequest.metadata; subsequent messages carry tar bytes.
+  // Equivalent to `docker load` / `ctr image import`. After import the
+  // server unpacks each ref into the snapshotter so it's ready to back
+  // a container without a separate pull.
+  rpc Push(stream ImagePushRequest) returns (ImagePushResponse);
+}
+
+message ImageListRequest {}
+
+message ImageListResponse {
+  repeated Image images = 1;
+}
+
+message Image {
+  // Fully-qualified ref, e.g. "docker.io/library/alpine:3.20" or
+  // "myhost/myapp:dev".
+  string name = 1;
+  // Manifest digest, e.g. "sha256:abc123…".
+  string digest = 2;
+  // Total size of the image's content (manifest + config + layers) in
+  // bytes, as reported by containerd's content store.
+  int64 size_bytes = 3;
+  // Image creation time in Unix seconds (containerd's UpdatedAt — rises
+  // when an image is re-pushed).
+  int64 created_unix = 4;
+}
+
+message ImagePushRequest {
+  oneof msg {
+    ImagePushMetadata metadata = 1; // first message only
+    bytes chunk = 2;                // streaming tar bytes
+  }
+}
+
+message ImagePushMetadata {
+  // Total archive size in bytes. Optional but lets the server pre-size
+  // any internal buffers and surface progress.
+  uint64 total_bytes = 1;
+}
+
+message ImagePushResponse {
+  // Refs the server discovered in the archive and registered into the
+  // image store. Empty if the archive contained no image manifests.
+  repeated string image_refs = 1;
+  // Total tar bytes received from the client.
+  uint64 bytes_received = 2;
+}

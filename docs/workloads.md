@@ -193,6 +193,28 @@ capsulectl workload delete <name>              # stop + delete the row
 
 `workload logs --serial` is microVM-only; it streams the Firecracker serial console (kernel boot + `capsule-guest` + early failures). Use it when the guest agent isn't reachable (e.g. the VM's kernel didn't come up).
 
+## Images that aren't in a registry
+
+A workload's `image:` is normally pulled from a public or private registry on first use. When the image isn't in any registry the capsule can reach — local builds, air-gapped images, work in progress — push it directly into the capsule's containerd cache instead:
+
+```sh
+docker save myapp:dev -o /tmp/myapp.tar
+capsulectl image push /tmp/myapp.tar
+# or pipe stdin:
+docker save myapp:dev | capsulectl image push -
+```
+
+Then reference the same ref in the manifest:
+
+```yaml
+name: myapp
+kind: Container
+container:
+  image: myapp:dev      # found in cache; no registry pull
+```
+
+`capsulectl image list` shows what's cached. See [cli.md](cli.md#image) for full details.
+
 ## Volume operations
 
 ```sh

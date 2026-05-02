@@ -27,6 +27,7 @@ type Config struct {
 	Capsule  *controllers.CapsuleController
 	Workload *controllers.WorkloadController
 	Volume   *controllers.VolumeController
+	Image    *controllers.ImageController
 }
 
 // Serve starts the gRPC server and blocks until ctx is cancelled or the
@@ -67,6 +68,9 @@ func Serve(ctx context.Context, cfg Config) error {
 	}
 	if cfg.Volume != nil {
 		capsulev1.RegisterVolumeServiceServer(srv, cfg.Volume)
+	}
+	if cfg.Image != nil {
+		capsulev1.RegisterImageServiceServer(srv, cfg.Image)
 	}
 
 	// Reflection is handy for phase 0 grpcurl exploration; keep it until

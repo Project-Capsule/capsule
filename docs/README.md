@@ -24,4 +24,5 @@ This folder is the operator's manual.
 - **`capsule-guest`** — the tiny PID 1 that runs *inside* every microVM. Speaks gRPC over vsock so the host can `Exec` / `Logs` / `Stop` into the VM.
 - **Workload** — a `Container` or `MicroVM` declared by a YAML manifest. Same spec shape (`image`, `command`, `args`, `env`, `ports`, `mounts`); flip `kind` to switch.
 - **Volume** — a thin-provisioned LVM logical volume formatted ext4. Mountable into containers (bind) or microVMs (virtio-blk).
+- **Image cache** — containerd's local image store on `/perm`. Workloads pull on first use; `capsulectl image push` side-loads images that aren't in any reachable registry.
 - **Slot** — `slot_a` / `slot_b`. The two rootfs partitions an A/B update toggles between.

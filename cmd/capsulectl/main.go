@@ -179,6 +179,14 @@ func main() {
 			break
 		}
 		err = volumeDelete(*addr, fs.Arg(0), *force)
+	case "image list":
+		err = imageList(*addr)
+	case "image push":
+		if len(subArgs) < 1 {
+			err = errors.New("image push requires a tarball path (or '-' for stdin)")
+			break
+		}
+		err = imagePush(*addr, subArgs[0])
 	case "volume resize":
 		if len(subArgs) < 2 {
 			err = errors.New("volume resize requires <name> <size>")
@@ -249,6 +257,8 @@ Usage:
   capsulectl [--capsule host:port] volume get <name>
   capsulectl [--capsule host:port] volume delete [--force] <name>
   capsulectl [--capsule host:port] volume resize <name> <size>
+  capsulectl [--capsule host:port] image list
+  capsulectl [--capsule host:port] image push <tarball>             # '-' = stdin (pipe 'docker save')
 `)
 }
 
@@ -1290,6 +1300,140 @@ func volumeDelete(addr, name string, force bool) error {
 		fmt.Printf("deleted volume %q\n", name)
 		return nil
 	})
+}
+
+// --- image -----------------------------------------------------------------
+
+func imageList(addr string) error {
+	conn, err := dial(addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := capsulev1.NewImageServiceClient(conn)
+	return withCtx(func(ctx context.Context) error {
+		resp, err := client.List(ctx, &capsulev1.ImageListRequest{})
+		if err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(tw, "NAME\tDIGEST\tSIZE\tUPDATED")
+		for _, img := range resp.GetImages() {
+			digest := img.GetDigest()
+			// Trim "sha256:" + middle of the hash so the column stays
+			// readable in a terminal — keeps the first 12 hex chars,
+			// same shape as `docker images`.
+			if len(digest) > 19 && strings.HasPrefix(digest, "sha256:") {
+				digest = digest[:19]
+			}
+			updated := "-"
+			if img.GetCreatedUnix() > 0 {
+				updated = time.Unix(img.GetCreatedUnix(), 0).Format(time.RFC3339)
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+				img.GetName(),
+				digest,
+				humanBytes(uint64(img.GetSizeBytes())),
+				updated,
+			)
+		}
+		return tw.Flush()
+	})
+}
+
+// imagePush streams an OCI / docker-save tarball to the capsule's
+// containerd image store. path == "-" means stdin (so you can pipe
+// `docker save myimage:tag | capsulectl image push -`); otherwise we
+// open the file and stat it for a totalBytes hint.
+func imagePush(addr, path string) error {
+	var src io.Reader
+	var totalBytes uint64
+	if path == "-" {
+		src = os.Stdin
+	} else {
+		st, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("stat tarball: %w", err)
+		}
+		totalBytes = uint64(st.Size())
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("open tarball: %w", err)
+		}
+		defer f.Close()
+		src = f
+	}
+
+	conn, err := dial(addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := capsulev1.NewImageServiceClient(conn)
+
+	// Long timeout: importing a multi-GiB image over a slow link is
+	// legitimate. UpdateOS uses 30 minutes for the same reason.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	stream, err := client.Push(ctx)
+	if err != nil {
+		return fmt.Errorf("Push: %w", err)
+	}
+	if err := stream.Send(&capsulev1.ImagePushRequest{
+		Msg: &capsulev1.ImagePushRequest_Metadata{
+			Metadata: &capsulev1.ImagePushMetadata{TotalBytes: totalBytes},
+		},
+	}); err != nil {
+		return fmt.Errorf("send metadata: %w", err)
+	}
+
+	buf := make([]byte, 1024*1024) // 1 MiB chunks — same as UpdateOS
+	var sent uint64
+	lastTick := time.Now()
+	for {
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if err := stream.Send(&capsulev1.ImagePushRequest{
+				Msg: &capsulev1.ImagePushRequest_Chunk{Chunk: append([]byte(nil), buf[:n]...)},
+			}); err != nil {
+				return fmt.Errorf("send chunk: %w", err)
+			}
+			sent += uint64(n)
+			if time.Since(lastTick) > 500*time.Millisecond {
+				if totalBytes > 0 {
+					fmt.Fprintf(os.Stderr, "\r  pushing... %d / %d MiB",
+						sent/(1024*1024), totalBytes/(1024*1024))
+				} else {
+					fmt.Fprintf(os.Stderr, "\r  pushing... %d MiB", sent/(1024*1024))
+				}
+				lastTick = time.Now()
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return fmt.Errorf("read tarball: %w", rerr)
+		}
+	}
+	if sent > 0 {
+		fmt.Fprintln(os.Stderr)
+	}
+
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		return fmt.Errorf("CloseAndRecv: %w", err)
+	}
+	if len(resp.GetImageRefs()) == 0 {
+		fmt.Printf("imported (no manifests in archive — bytes: %d)\n", resp.GetBytesReceived())
+		return nil
+	}
+	fmt.Printf("imported %d ref(s) (%d bytes):\n", len(resp.GetImageRefs()), resp.GetBytesReceived())
+	for _, ref := range resp.GetImageRefs() {
+		fmt.Printf("  %s\n", ref)
+	}
+	return nil
 }
 
 func humanBytes(n uint64) string {

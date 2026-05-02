@@ -14,6 +14,7 @@ import (
 
 	"github.com/geekgonecrazy/capsule/boot"
 	"github.com/geekgonecrazy/capsule/controllers"
+	coreimage "github.com/geekgonecrazy/capsule/core/image"
 	"github.com/geekgonecrazy/capsule/core/reconciler"
 	coreupdate "github.com/geekgonecrazy/capsule/core/update"
 	corevolume "github.com/geekgonecrazy/capsule/core/volume"
@@ -150,6 +151,17 @@ func main() {
 	volumeSvc := corevolume.New(st)
 	volumeCtl := &controllers.VolumeController{Service: volumeSvc}
 
+	// ImageService backs `capsulectl image list / push`. The same
+	// containerd driver that runs containers also implements the
+	// ImageStore port — when containerDriver is nil (dev mode) the
+	// service surfaces FailedPrecondition.
+	var imageStore runtime.ImageStore
+	if cd, ok := containerDriver.(runtime.ImageStore); ok {
+		imageStore = cd
+	}
+	imageSvc := coreimage.New(imageStore)
+	imageCtl := &controllers.ImageController{Service: imageSvc}
+
 	if containerDriver != nil || vmDriver != nil {
 		rec := reconciler.New(reconciler.Config{
 			Service:  workloadSvc,
@@ -185,6 +197,7 @@ func main() {
 		Capsule:  capsuleCtl,
 		Workload: workloadCtl,
 		Volume:   volumeCtl,
+		Image:    imageCtl,
 	}); err != nil {
 		slog.Error("gRPC server failed", "err", err)
 		if isPID1 {

@@ -7,6 +7,7 @@ package runtime
 import (
 	"context"
 	"io"
+	"time"
 
 	capsulev1 "github.com/geekgonecrazy/capsule/models/capsule/v1"
 )
@@ -103,6 +104,40 @@ type ExecRequest struct {
 type TermSize struct {
 	Cols uint32
 	Rows uint32
+}
+
+// Image is a snapshot of one image in the runtime's image store. Used
+// by ImageStore.List to surface "what's cached on this capsule" without
+// dragging containerd types up into the controller layer.
+type Image struct {
+	// Name is the fully-qualified ref the image is stored under
+	// (e.g. "docker.io/library/alpine:3.20").
+	Name string
+	// Digest is the manifest digest, e.g. "sha256:abc…".
+	Digest string
+	// Size is the total content size — manifest + config + reachable
+	// layers — as reported by the content store.
+	Size int64
+	// CreatedAt is the image record's UpdatedAt timestamp from the
+	// metadata store: bumped on (re)pull/push, useful as a "last seen
+	// activity" hint.
+	CreatedAt time.Time
+}
+
+// ImageStore is the side-channel for cached-image inspection and
+// operator-pushed import. Implemented by the same backend that runs
+// containers (the containerd driver), but kept on its own interface so
+// controllers/services that only deal with images don't depend on the
+// container lifecycle methods.
+type ImageStore interface {
+	// List returns every image the runtime has cached.
+	List(ctx context.Context) ([]Image, error)
+	// Import reads an OCI / docker-save tar archive from r and registers
+	// every image manifest it finds into the runtime's image store. It
+	// also unpacks each image into the snapshotter so it can immediately
+	// back a container without an extra pull. Returns the refs that were
+	// imported.
+	Import(ctx context.Context, r io.Reader) ([]string, error)
 }
 
 // VMDriver runs MicroVM-kind workloads. Shape mirrors ContainerDriver

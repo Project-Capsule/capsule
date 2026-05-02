@@ -38,6 +38,8 @@ capsulectl [--capsule host:port] volume list
 capsulectl [--capsule host:port] volume get <name>
 capsulectl [--capsule host:port] volume delete [--force] <name>
 capsulectl [--capsule host:port] volume resize <name> <size>
+capsulectl [--capsule host:port] image list
+capsulectl [--capsule host:port] image push <tarball>
 ```
 
 ## `apply -f`
@@ -175,6 +177,46 @@ Full volume metadata.
 ### `volume delete [--force] <name>`
 
 Remove a volume. Default rejects if attached; `--force` first detaches the workload (if any) before deleting.
+
+## `image`
+
+Manages the capsule's containerd image cache. Useful for images that aren't in any registry the capsule can reach — local builds, private/air-gapped images, or one-off testing without spinning up a registry.
+
+### `image list`
+
+Table of every image cached on the capsule (whether pulled by a workload or pushed by you):
+
+```
+NAME                                  DIGEST               SIZE     UPDATED
+docker.io/library/alpine:3.20         sha256:abcd123456…   8.1MiB   2026-04-30T12:11:08Z
+myhost/myapp:dev                      sha256:0fedba9876…   142.0MiB 2026-05-01T22:05:14Z
+```
+
+`SIZE` is total content size (manifest + config + reachable layers). `UPDATED` is bumped on (re)pull or (re)push.
+
+### `image push <tarball>`
+
+Streams an OCI / docker-save tar archive into the capsule's image store and unpacks it into the snapshotter so it's immediately usable as a workload `image:`.
+
+```sh
+# Build locally, save, push.
+docker save myapp:dev -o /tmp/myapp.tar
+capsulectl image push /tmp/myapp.tar
+
+# Or pipe directly from `docker save`:
+docker save myapp:dev | capsulectl image push -
+```
+
+The CLI prints a progress line while bytes are in flight and lists the imported refs on success. After that, reference the same ref in a manifest and apply — `capsuled` finds it cached and skips the registry pull entirely:
+
+```yaml
+name: myapp
+kind: Container
+container:
+  image: myapp:dev      # same ref docker save used; no registry involved
+```
+
+Multi-arch tarballs are accepted; only the platform matching the capsule unpacks (others stay as content-addressed blobs in the store, which is fine).
 
 ## Sizes
 
