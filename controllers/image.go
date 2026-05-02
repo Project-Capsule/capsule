@@ -39,12 +39,15 @@ func (c *ImageController) List(ctx context.Context, _ *capsulev1.ImageListReques
 func (c *ImageController) Push(stream capsulev1.ImageService_PushServer) error {
 	first, err := stream.Recv()
 	if err != nil {
+		slog.Error("image push: recv metadata", "err", err)
 		return err
 	}
 	if first.GetMetadata() == nil {
+		slog.Error("image push: first message missing metadata")
 		return status.Error(codes.InvalidArgument, "first Push message must carry metadata")
 	}
 	totalBytes := first.GetMetadata().GetTotalBytes()
+	slog.Info("image push: receiving", "total_bytes", totalBytes)
 
 	pr, pw := io.Pipe()
 
@@ -86,12 +89,14 @@ func (c *ImageController) Push(stream capsulev1.ImageService_PushServer) error {
 	rerr := <-recvDone
 
 	if importErr != nil {
+		slog.Error("image push: import failed", "received", received, "err", importErr)
 		if errors.Is(importErr, coreimage.ErrNoRuntime) {
 			return status.Error(codes.FailedPrecondition, importErr.Error())
 		}
 		return status.Error(codes.Internal, importErr.Error())
 	}
 	if rerr != nil {
+		slog.Error("image push: recv stream failed", "received", received, "err", rerr)
 		return status.Error(codes.Internal, rerr.Error())
 	}
 	slog.Info("image push", "refs", refs, "bytes", received, "metadata_total", totalBytes)

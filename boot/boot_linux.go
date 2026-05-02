@@ -361,8 +361,10 @@ func detectActiveSlot() string {
 // LV for /perm, and a thin pool for volumes + containerd snapshots.
 //
 // Sizes:
-//   - meta LV: 512 MiB. Enough for state.db (sqlite) + /perm/containerd/root
-//     metadata; user-visible logs go to tmpfs, not /perm.
+//   - meta LV: scaled with the VG — min(25% of VG, 32 GiB), floor 1 GiB.
+//     /perm holds state.db, update staging (~2.4 GiB peak during a push),
+//     AND the containerd content store (every image ever pushed/pulled),
+//     so a fixed small size starves image work on big disks.
 //   - thinpool: the remainder of the VG (minus a small reserve LVM wants
 //     for metadata volumes), thin-provisioned so declared LV sizes don't
 //     preallocate.
@@ -373,7 +375,12 @@ func initializeCapsuleVG(dev string) error {
 	if err := runLVM("/sbin/vgcreate", "capsule", dev); err != nil {
 		return err
 	}
-	if err := runLVM("/sbin/lvcreate", "-L", "512M", "-n", "meta", "capsule"); err != nil {
+	metaMiB, err := computeMetaMiB("capsule")
+	if err != nil {
+		return err
+	}
+	slog.Info("creating meta LV", "size_mib", metaMiB)
+	if err := runLVM("/sbin/lvcreate", "-L", fmt.Sprintf("%dM", metaMiB), "-n", "meta", "capsule"); err != nil {
 		return err
 	}
 	if err := runLVM("/usr/sbin/mkfs.ext4", "-q", "-F", "/dev/capsule/meta"); err != nil {
@@ -416,6 +423,34 @@ func runLVM(bin string, args ...string) error {
 		return fmt.Errorf("%s %s: %w: %s", bin, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// computeMetaMiB returns the meta LV size for a freshly-created VG.
+// Reads vg_size from `vgs` and applies min(25% of VG, 32 GiB), floor 1 GiB.
+// On a 2 GiB pack.sh template image the floor wins (1 GiB); on real
+// hardware (tens of GiB to TiB) the percentage takes over until the cap.
+func computeMetaMiB(vg string) (uint64, error) {
+	cmd := exec.Command("/sbin/vgs", "--noheadings", "--units", "m", "--nosuffix", "-o", "vg_size", vg)
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("vgs %s: %w", vg, err)
+	}
+	field := strings.TrimSpace(string(out))
+	// vgs prints e.g. "  2044.00" — accept either int or float MiB.
+	vgMiBFloat, err := strconv.ParseFloat(field, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse vg_size %q: %w", field, err)
+	}
+	vgMiB := uint64(vgMiBFloat)
+	meta := vgMiB / 4
+	const floor, cap uint64 = 1024, 32 * 1024
+	if meta < floor {
+		meta = floor
+	}
+	if meta > cap {
+		meta = cap
+	}
+	return meta, nil
 }
 
 // waitForBlockDevice polls for path to appear as a block device, up to

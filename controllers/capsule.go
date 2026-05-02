@@ -94,6 +94,7 @@ func (c *CapsuleController) GetInfo(ctx context.Context, _ *capsulev1.GetInfoReq
 	cpuCores, cpuModel := cpuInfo()
 	diskPath, diskTotal := diskInfo()
 	poolTotal, poolUsed := thinpoolUsage()
+	permTotal, permUsed := permUsage()
 
 	resp := &capsulev1.GetInfoResponse{
 		Hostname:             hostname,
@@ -111,6 +112,8 @@ func (c *CapsuleController) GetInfo(ctx context.Context, _ *capsulev1.GetInfoReq
 		DiskTotalBytes:       diskTotal,
 		ThinpoolTotalBytes:   poolTotal,
 		ThinpoolUsedBytes:    poolUsed,
+		PermTotalBytes:       permTotal,
+		PermUsedBytes:        permUsed,
 		LocalTimeUnix:        time.Now().Unix(),
 	}
 	if c.OSStateStore != nil {

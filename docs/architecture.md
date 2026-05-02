@@ -32,8 +32,8 @@ Slot size is **fixed at install time** (default 2 GiB, override with `SLOT_SIZE_
 
 The LVM volume group `capsule` contains:
 
-- `lv_perm` — ext4, mounted at `/perm`. Holds `state.db`, update staging, anything that must survive reboot.
-- `thinpool` — thin pool. Backs both user volumes (`vol-<name>`) and containerd's snapshotter.
+- `lv_perm` — ext4, mounted at `/perm`. Holds `state.db`, update staging (`/perm/updates/...`, ~2.4 GiB peak during a push), and the containerd **content store** (`/perm/containerd/...` — every cached image's raw blobs). Sized at first boot as `min(25% of VG, 32 GiB)` with a 1 GiB floor — scaled to the disk so image work doesn't starve.
+- `thinpool` — thin pool. Backs both user volumes (`vol-<name>`) and containerd's **snapshotter** (the unpacked overlays).
 
 ## Boot chain
 

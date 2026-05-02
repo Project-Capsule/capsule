@@ -18,7 +18,9 @@ Two papercuts to know about every time you open a debug session:
 
 ## Grow the PERM partition
 
-`PERM` (partition 4) is created at `PERM_SIZE_MIB=2048` (2 GiB) by `image/pack.sh`. On a real disk that's almost always too small — the LVM PV inside backs both `/perm` (capsule state) and the thinpool (every user volume + containerd snapshotter). When `capsule info` shows `volume pool` close to full, this is the move.
+`PERM` (partition 4) is created at `PERM_SIZE_MIB=2048` (2 GiB) by `image/pack.sh`. On a real disk that's almost always too small — the LVM PV inside backs both `/perm` (capsule state + image content store) and the thinpool (every user volume + containerd snapshotter). When `capsule info` shows `/perm` or `volume pool` close to full, this is the move.
+
+Fresh installs auto-size the `meta` LV (= `/perm`) as `min(25% of VG, 32 GiB)` with a 1 GiB floor, so growing the partition gives `/perm` proportional headroom on its next install. **Existing capsules** keep whatever `meta` they were originally created with (older installs got a fixed 512 MiB) — for those, after the partition grow, also extend `meta` directly: `lvextend -L +Ng --resizefs /dev/capsule/meta`.
 
 PERM is the **last** partition on the disk, so you can grow it online without disturbing anything. The exact sequence is mechanical; do it from a debug session:
 

@@ -401,6 +401,11 @@ func capsuleInfo(addr string) error {
 		if resp.DiskTotalBytes > 0 {
 			fmt.Printf("  disk:            %s — %s total\n", resp.BootDisk, humanBytes(resp.DiskTotalBytes))
 		}
+		if resp.PermTotalBytes > 0 {
+			pct := 100.0 * float64(resp.PermUsedBytes) / float64(resp.PermTotalBytes)
+			fmt.Printf("  /perm:           %s used / %s total (%.1f%% full)\n",
+				humanBytes(resp.PermUsedBytes), humanBytes(resp.PermTotalBytes), pct)
+		}
 		if resp.ThinpoolTotalBytes > 0 {
 			pct := 100.0 * float64(resp.ThinpoolUsedBytes) / float64(resp.ThinpoolTotalBytes)
 			fmt.Printf("  volume pool:     %s used / %s total (%.1f%% full)\n",
@@ -1391,12 +1396,21 @@ func imagePush(addr, path string) error {
 	buf := make([]byte, 1024*1024) // 1 MiB chunks — same as UpdateOS
 	var sent uint64
 	lastTick := time.Now()
+	// sendAborted: gRPC returns io.EOF on Send when the server has already
+	// closed the stream with a non-OK status. The actual status is only
+	// available via CloseAndRecv — so on EOF we stop sending and fall
+	// through to it instead of masking the real error with "send chunk: EOF".
+	sendAborted := false
 	for {
 		n, rerr := src.Read(buf)
 		if n > 0 {
 			if err := stream.Send(&capsulev1.ImagePushRequest{
 				Msg: &capsulev1.ImagePushRequest_Chunk{Chunk: append([]byte(nil), buf[:n]...)},
 			}); err != nil {
+				if err == io.EOF {
+					sendAborted = true
+					break
+				}
 				return fmt.Errorf("send chunk: %w", err)
 			}
 			sent += uint64(n)
@@ -1423,6 +1437,9 @@ func imagePush(addr, path string) error {
 
 	resp, err := stream.CloseAndRecv()
 	if err != nil {
+		if sendAborted {
+			return fmt.Errorf("server aborted at %d MiB: %w", sent/(1024*1024), err)
+		}
 		return fmt.Errorf("CloseAndRecv: %w", err)
 	}
 	if len(resp.GetImageRefs()) == 0 {

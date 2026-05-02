@@ -103,6 +103,12 @@ type GetInfoResponse struct {
 	// LVM thin-pool data currently allocated. Capsule fills up when this
 	// approaches thinpool_total_bytes.
 	ThinpoolUsedBytes uint64 `protobuf:"varint,18,opt,name=thinpool_used_bytes,json=thinpoolUsedBytes,proto3" json:"thinpool_used_bytes,omitempty"`
+	// /perm filesystem (the `meta` LV) capacity in bytes — what holds
+	// state.db, update staging, and the containerd content store
+	// (every cached image). Image push fails when this fills.
+	PermTotalBytes uint64 `protobuf:"varint,20,opt,name=perm_total_bytes,json=permTotalBytes,proto3" json:"perm_total_bytes,omitempty"`
+	// /perm bytes currently used (statvfs f_bsize * (f_blocks - f_bfree)).
+	PermUsedBytes uint64 `protobuf:"varint,21,opt,name=perm_used_bytes,json=permUsedBytes,proto3" json:"perm_used_bytes,omitempty"`
 	// Capsule's current wall-clock time as Unix seconds. Lets capsulectl
 	// surface clock skew between operator and capsule — drift breaks A/B
 	// deadline-passed messages, log correlation, etc.
@@ -263,6 +269,20 @@ func (x *GetInfoResponse) GetThinpoolTotalBytes() uint64 {
 func (x *GetInfoResponse) GetThinpoolUsedBytes() uint64 {
 	if x != nil {
 		return x.ThinpoolUsedBytes
+	}
+	return 0
+}
+
+func (x *GetInfoResponse) GetPermTotalBytes() uint64 {
+	if x != nil {
+		return x.PermTotalBytes
+	}
+	return 0
+}
+
+func (x *GetInfoResponse) GetPermUsedBytes() uint64 {
+	if x != nil {
+		return x.PermUsedBytes
 	}
 	return 0
 }
@@ -669,7 +689,7 @@ const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\n" +
 	"\x18capsule/v1/capsule.proto\x12\n" +
 	"capsule.v1\"\x10\n" +
-	"\x0eGetInfoRequest\"\xf9\x05\n" +
+	"\x0eGetInfoRequest\"\xcb\x06\n" +
 	"\x0fGetInfoResponse\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12%\n" +
 	"\x0ekernel_release\x18\x02 \x01(\tR\rkernelRelease\x12%\n" +
@@ -690,7 +710,9 @@ const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\tboot_disk\x18\x0f \x01(\tR\bbootDisk\x12(\n" +
 	"\x10disk_total_bytes\x18\x10 \x01(\x04R\x0ediskTotalBytes\x120\n" +
 	"\x14thinpool_total_bytes\x18\x11 \x01(\x04R\x12thinpoolTotalBytes\x12.\n" +
-	"\x13thinpool_used_bytes\x18\x12 \x01(\x04R\x11thinpoolUsedBytes\x12&\n" +
+	"\x13thinpool_used_bytes\x18\x12 \x01(\x04R\x11thinpoolUsedBytes\x12(\n" +
+	"\x10perm_total_bytes\x18\x14 \x01(\x04R\x0epermTotalBytes\x12&\n" +
+	"\x0fperm_used_bytes\x18\x15 \x01(\x04R\rpermUsedBytes\x12&\n" +
 	"\x0flocal_time_unix\x18\x13 \x01(\x03R\rlocalTimeUnix\"K\n" +
 	"\x12CapsuleLogsRequest\x12\x16\n" +
 	"\x06follow\x18\x01 \x01(\bR\x06follow\x12\x1d\n" +

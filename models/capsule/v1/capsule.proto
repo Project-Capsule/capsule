@@ -79,6 +79,12 @@ message GetInfoResponse {
   // LVM thin-pool data currently allocated. Capsule fills up when this
   // approaches thinpool_total_bytes.
   uint64 thinpool_used_bytes = 18;
+  // /perm filesystem (the `meta` LV) capacity in bytes — what holds
+  // state.db, update staging, and the containerd content store
+  // (every cached image). Image push fails when this fills.
+  uint64 perm_total_bytes = 20;
+  // /perm bytes currently used (statvfs f_bsize * (f_blocks - f_bfree)).
+  uint64 perm_used_bytes = 21;
   // Capsule's current wall-clock time as Unix seconds. Lets capsulectl
   // surface clock skew between operator and capsule — drift breaks A/B
   // deadline-passed messages, log correlation, etc.

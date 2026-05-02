@@ -145,6 +145,19 @@ func thinpoolUsage() (total, used uint64) {
 	return total, used
 }
 
+// permUsage returns (total, used) bytes for the /perm filesystem via
+// statfs. Zeros on error or when /perm isn't mounted (dev mode).
+func permUsage() (total, used uint64) {
+	var s unix.Statfs_t
+	if err := unix.Statfs("/perm", &s); err != nil {
+		return 0, 0
+	}
+	bsize := uint64(s.Bsize)
+	total = bsize * s.Blocks
+	used = bsize * (s.Blocks - s.Bfree)
+	return total, used
+}
+
 func cstr(b []byte) string {
 	for i, c := range b {
 		if c == 0 {

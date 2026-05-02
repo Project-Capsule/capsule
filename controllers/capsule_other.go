@@ -17,3 +17,4 @@ func memInfo() (uint64, uint64)                    { return 0, 0 }
 func cpuInfo() (uint32, string)                    { return uint32(runtime.NumCPU()), "" }
 func diskInfo() (string, uint64)                   { return "", 0 }
 func thinpoolUsage() (uint64, uint64)              { return 0, 0 }
+func permUsage() (uint64, uint64)                  { return 0, 0 }
