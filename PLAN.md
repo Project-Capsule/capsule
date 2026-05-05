@@ -109,6 +109,7 @@ Things that currently work but are brittle, hacky, or "good enough for now."
 - **vsock.uds file lingers** on Firecracker crash. Driver pre-unlinks `vsock.uds` and `api.sock` on every Start. Same for the payload disk dir.
 - **Exec -t over vsock has no window-resize** — we get the ExecResize message from the client but runc's CLI has no way to forward it mid-session. Needs a console-socket protocol. Low priority — most interactive use is `-t` for a short command; real sessions via `capsulectl exec` work with 80x24.
 - **Guest ready timeout is 60s**, generous to cover contended cloud VMs. Could be smarter (e.g., adapt based on kernel boot time).
+- **Volume-flush on Stop depends on in-memory `d.vms[name]`.** `agent.Stop` now unmounts every user volume before returning so ext4 commits its journal before Firecracker dies — but it only fires when `Driver.Remove` dials the guest agent over the existing in-memory `guestConn`. If capsuled was restarted (zombie VM still running, in-memory `d.vms` map empty), `Remove` falls through to `Shutdown`/`StopVMM` directly and the umount never happens → silent data loss recurs. Fix shape: have `Remove` re-dial the guest agent fresh from `<vmDir>/vsock.uds` when the in-memory entry is missing. Tied to the broader "reconnect to live VMs after capsuled restart" gap (today the reconciler will try to *create* a second VM with the same name and fail at TAP/socket conflicts).
 
 ### Volumes
 
