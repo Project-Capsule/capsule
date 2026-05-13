@@ -476,6 +476,13 @@ func ensurePermDirs(root string) error {
 			return err
 		}
 	}
+	// /perm/tls holds the self-signed server cert + key. 0700 because
+	// the private key lives here. Created at the same time as the rest
+	// so capsuled doesn't have to mkdir before LoadOrGenerate.
+	tlsDir := filepath.Join(root, "tls")
+	if err := os.MkdirAll(tlsDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
 	return nil
 }
 

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"errors"
 	"flag"
 	"io"
 	"log/slog"
@@ -12,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/geekgonecrazy/capsule/auth"
 	"github.com/geekgonecrazy/capsule/boot"
 	"github.com/geekgonecrazy/capsule/controllers"
 	coreimage "github.com/geekgonecrazy/capsule/core/image"
@@ -29,6 +34,21 @@ import (
 	"github.com/geekgonecrazy/capsule/supervise"
 )
 
+// resetAuthSentinel is the file an operator with local console access
+// touches to wipe the authorized_keys table on next boot. Capsuled only
+// honors it when the file's mtime is within resetAuthMaxAge — power-
+// cycling the box is not enough to wipe identity, which is the point.
+const (
+	resetAuthSentinel = "/perm/capsule/RESET_AUTH"
+	resetAuthMaxAge   = 5 * time.Minute
+)
+
+// claimWindowDuration is how long a fresh (zero-keys-enrolled) capsule
+// accepts unauthenticated Adopt calls before slamming the gate shut.
+// 30 min covers a typical "boot + alt-tab + remember to adopt" flow
+// without leaving the window open indefinitely.
+const claimWindowDuration = 30 * time.Minute
+
 // version is overridden at build time via -ldflags '-X main.version=...'.
 var version = "dev"
 
@@ -39,6 +59,7 @@ const CapsuleLogPath = "/run/capsule/capsuled.log"
 
 func main() {
 	addr := flag.String("addr", ":50000", "gRPC listen address")
+	enableReflection := flag.Bool("enable-reflection", false, "expose grpc reflection (dev only — leaks wire schema)")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -72,6 +93,23 @@ func main() {
 		}
 		bootResult = r
 		go boot.ReapZombies(ctx)
+	}
+
+	// Honor the operator-triggered RESET_AUTH sentinel before opening
+	// the SQLite DB so the wipe path is one path, not two. Recent mtime
+	// is required: power-cycling alone must not wipe credentials.
+	if isPID1 && bootResult.MountedPerm {
+		if info, err := os.Stat(resetAuthSentinel); err == nil {
+			if time.Since(info.ModTime()) <= resetAuthMaxAge {
+				slog.Warn("RESET_AUTH sentinel honored — wiping authorized keys", "mtime", info.ModTime())
+				if err := wipeAuthOnDisk("/perm/capsule/state.db"); err != nil {
+					slog.Error("RESET_AUTH wipe failed", "err", err)
+				}
+				_ = os.Remove(resetAuthSentinel)
+			} else {
+				slog.Warn("RESET_AUTH sentinel ignored — too old", "mtime", info.ModTime(), "max_age", resetAuthMaxAge)
+			}
+		}
 	}
 
 	// /run is mounted now — extend the slog tee to also write the
@@ -128,6 +166,62 @@ func main() {
 		ActiveSlot:     bootResult.ActiveSlot,
 		OSStateStore:   st.OSState(),
 		UpdateService:  updateSvc,
+	}
+
+	// --- identity + TLS + auth ---
+	// Seed the singleton CapsuleIdentity row on first boot. UUIDv4 lives
+	// for the life of the disk; pinned by JWT `aud` so a token minted
+	// for one capsule can't be replayed on another.
+	identity, err := ensureIdentity(ctx, st.Identity())
+	if err != nil {
+		slog.Error("ensure identity failed; capsule will refuse all RPCs", "err", err)
+	}
+	tlsCertPath, tlsKeyPath := "/perm/tls/server.crt", "/perm/tls/server.key"
+	if !bootResult.MountedPerm {
+		// Dev / non-PID-1 run — keep TLS material in tmpfs so the dev
+		// loop doesn't litter the operator's host with leftover certs.
+		dir, derr := os.MkdirTemp("", "capsule-tls-*")
+		if derr == nil {
+			tlsCertPath = dir + "/server.crt"
+			tlsKeyPath = dir + "/server.key"
+		}
+	}
+	tlsCert, err := auth.LoadOrGenerate(tlsCertPath, tlsKeyPath, identity.CapsuleID)
+	if err != nil {
+		slog.Error("TLS keypair load/generate failed", "err", err)
+	}
+	tlsFingerprint, _ := auth.LeafFingerprint(tlsCert)
+
+	enrolledCount, _ := st.AuthorizedKeys().Count(ctx)
+	claim := auth.NewClaimWindow(enrolledCount, claimWindowDuration)
+	if claim.Open() {
+		slog.Warn("claim window OPEN — first capsulectl adopt within "+claimWindowDuration.String()+" wins",
+			"capsule_id", identity.CapsuleID, "tls_fingerprint", tlsFingerprint)
+	} else {
+		slog.Info("capsule adopted",
+			"capsule_id", identity.CapsuleID, "enrolled_keys", enrolledCount, "tls_fingerprint", tlsFingerprint)
+	}
+
+	stopAuth := make(chan struct{})
+	defer close(stopAuth)
+	authn := auth.NewAuthenticator(identity.CapsuleID,
+		func(ctx context.Context, kid string) (ed25519.PublicKey, bool) {
+			k, err := st.AuthorizedKeys().Get(ctx, kid)
+			if err != nil {
+				return nil, false
+			}
+			pub, perr := auth.ParsePubkey(k.Pubkey)
+			if perr != nil {
+				return nil, false
+			}
+			return pub, true
+		}, claim, stopAuth)
+
+	identityCtl := &controllers.IdentityController{
+		Identity:       st.Identity(),
+		Keys:           st.AuthorizedKeys(),
+		Claim:          claim,
+		TLSFingerprint: tlsFingerprint,
 	}
 
 	// --- runtime driver (best-effort; workload APIs error out if nil) ---
@@ -188,16 +282,26 @@ func main() {
 					port = n
 				}
 			}
-			boot.PrintBanner(port)
+			n, _ := st.AuthorizedKeys().Count(ctx)
+			boot.PrintBanner(boot.BannerInfo{
+				GRPCPort:       port,
+				TLSFingerprint: tlsFingerprint,
+				ClaimOpen:      claim.Open(),
+				EnrolledKeys:   n,
+			})
 		}()
 	}
 
 	if err := router.Serve(ctx, router.Config{
-		Addr:     *addr,
-		Capsule:  capsuleCtl,
-		Workload: workloadCtl,
-		Volume:   volumeCtl,
-		Image:    imageCtl,
+		Addr:             *addr,
+		TLSCert:          tlsCert,
+		Auth:             authn,
+		EnableReflection: *enableReflection,
+		Capsule:          capsuleCtl,
+		Workload:         workloadCtl,
+		Volume:           volumeCtl,
+		Image:            imageCtl,
+		Identity:         identityCtl,
 	}); err != nil {
 		slog.Error("gRPC server failed", "err", err)
 		if isPID1 {
@@ -216,6 +320,57 @@ func main() {
 		slog.Info("capsule stopped")
 		select {}
 	}
+}
+
+// ensureIdentity returns the singleton CapsuleIdentity row, generating
+// it on first boot. Called before the gRPC server starts so the JWT
+// audience is stable from the very first RPC.
+func ensureIdentity(ctx context.Context, ids store.IdentityStore) (*store.CapsuleIdentity, error) {
+	id, err := ids.Get(ctx)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	fresh := &store.CapsuleIdentity{
+		CapsuleID:     uuid.NewString(),
+		CreatedAtUnix: time.Now().Unix(),
+	}
+	if err := ids.Put(ctx, fresh); err != nil {
+		return nil, err
+	}
+	slog.Info("generated capsule_id on first boot", "capsule_id", fresh.CapsuleID)
+	return fresh, nil
+}
+
+// wipeAuthOnDisk handles the RESET_AUTH recovery path before the main
+// SQLite handle opens. Opens its own short-lived handle, deletes every
+// row in authorized_keys, and clears adopted_at_unix / adopted_by_kid
+// on the singleton identity row so the next claim window opens.
+func wipeAuthOnDisk(dbPath string) error {
+	s, err := sqlite.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.AuthorizedKeys().DeleteAll(ctx); err != nil {
+		return err
+	}
+	id, err := s.Identity().Get(ctx)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	if id != nil {
+		id.AdoptedAtUnix = 0
+		id.AdoptedByKid = ""
+		if err := s.Identity().Put(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dialContainerd polls until the containerd socket is reachable or timeout

@@ -29,17 +29,37 @@ func Init(ctx context.Context) (Result, error) {
 	return initPlatform(ctx)
 }
 
-// PrintBanner writes a CAPSULE ASCII banner + current IP to /dev/tty0
-// (HDMI on real hardware) and /dev/console. Operator's "where do I point
-// capsulectl?" answer when the only output is HDMI. Best-effort: failing
-// to open either device is silent (running off PID 1, on macOS, etc.).
-func PrintBanner(grpcPort int) {
+// BannerInfo carries the dynamic bits the banner shows the HDMI operator:
+// the listening port, the SHA-256 fingerprint of the TLS leaf cert (so
+// `capsulectl adopt` can be visually confirmed), and whether the capsule
+// is awaiting adoption or already enrolled.
+type BannerInfo struct {
+	GRPCPort       int
+	TLSFingerprint string // hex, lowercase, no separators (formatted for display here)
+	ClaimOpen      bool
+	EnrolledKeys   int
+}
+
+// PrintBanner writes a CAPSULE ASCII banner + current IP + adoption
+// status to /dev/tty0 (HDMI on real hardware) and /dev/console.
+// Operator's "where do I point capsulectl?" answer when the only output
+// is HDMI. Best-effort: failing to open either device is silent
+// (running off PID 1, on macOS, etc.).
+func PrintBanner(info BannerInfo) {
 	ip := defaultIPv4()
 	target := ip
 	if ip == "" {
 		ip = "(no IP — DHCP failed?)"
 		target = "<capsule-ip>"
 	}
+	var status string
+	if info.ClaimOpen {
+		status = fmt.Sprintf("  status: AWAITING ADOPTION\n  capsulectl adopt --capsule %s:%d\n", target, info.GRPCPort)
+	} else {
+		status = fmt.Sprintf("  status: adopted (%d enrolled key(s))\n  capsulectl --capsule %s:%d capsule info\n",
+			info.EnrolledKeys, target, info.GRPCPort)
+	}
+	fp := formatFingerprintForBanner(info.TLSFingerprint)
 	banner := fmt.Sprintf(`
    ____    _    ____  ____  _   _ _     _____
   / ___|  / \  |  _ \/ ___|| | | | |   | ____|
@@ -48,9 +68,10 @@ func PrintBanner(grpcPort int) {
   \____/_/   \_\_|   |____/ \___/|_____|_____|
 
   ip: %s
-  capsulectl --capsule %s:%d capsule info
+%s  tls fingerprint (sha256):
+%s
 
-`, ip, target, grpcPort)
+`, ip, status, fp)
 	for _, p := range []string{"/dev/tty0", "/dev/console"} {
 		f, err := os.OpenFile(p, os.O_WRONLY, 0)
 		if err != nil {
@@ -59,6 +80,35 @@ func PrintBanner(grpcPort int) {
 		_, _ = f.WriteString(banner)
 		_ = f.Close()
 	}
+}
+
+// formatFingerprintForBanner groups a hex fingerprint into colon-
+// separated bytes, 8 bytes per row, indented for the banner. Avoids
+// importing the auth package here (boot is a lower layer).
+func formatFingerprintForBanner(hex string) string {
+	if hex == "" {
+		return "    (none)"
+	}
+	if len(hex)%2 != 0 {
+		return "    " + hex
+	}
+	var (
+		out []byte
+		col int
+	)
+	out = append(out, []byte("    ")...)
+	for i := 0; i < len(hex); i += 2 {
+		if col == 8 {
+			out = append(out, '\n')
+			out = append(out, []byte("    ")...)
+			col = 0
+		} else if col > 0 {
+			out = append(out, ':')
+		}
+		out = append(out, hex[i], hex[i+1])
+		col++
+	}
+	return string(out)
 }
 
 // defaultIPv4 returns the first non-loopback IPv4 address in dotted-quad

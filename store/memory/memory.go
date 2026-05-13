@@ -6,6 +6,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	capsulev1 "github.com/geekgonecrazy/capsule/models/capsule/v1"
 	"github.com/geekgonecrazy/capsule/store"
@@ -16,6 +17,8 @@ type memStore struct {
 	workloads *workloadStore
 	volumes   *volumeStore
 	osState   *osStateStore
+	identity  *identityStore
+	authKeys  *authKeyStore
 }
 
 // New returns a fresh in-memory Store.
@@ -24,13 +27,17 @@ func New() store.Store {
 		workloads: &workloadStore{items: map[string]*capsulev1.Workload{}},
 		volumes:   &volumeStore{items: map[string]*capsulev1.Volume{}},
 		osState:   &osStateStore{},
+		identity:  &identityStore{},
+		authKeys:  &authKeyStore{items: map[string]*store.AuthorizedKey{}},
 	}
 }
 
-func (m *memStore) Workloads() store.WorkloadStore { return m.workloads }
-func (m *memStore) Volumes() store.VolumeStore     { return m.volumes }
-func (m *memStore) OSState() store.OSStateStore    { return m.osState }
-func (m *memStore) Close() error                   { return nil }
+func (m *memStore) Workloads() store.WorkloadStore           { return m.workloads }
+func (m *memStore) Volumes() store.VolumeStore               { return m.volumes }
+func (m *memStore) OSState() store.OSStateStore              { return m.osState }
+func (m *memStore) Identity() store.IdentityStore            { return m.identity }
+func (m *memStore) AuthorizedKeys() store.AuthorizedKeyStore { return m.authKeys }
+func (m *memStore) Close() error                             { return nil }
 
 type osStateStore struct {
 	mu    sync.RWMutex
@@ -138,5 +145,101 @@ func (s *workloadStore) Delete(_ context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.items, name)
+	return nil
+}
+
+type identityStore struct {
+	mu sync.RWMutex
+	id *store.CapsuleIdentity
+}
+
+func (s *identityStore) Get(_ context.Context) (*store.CapsuleIdentity, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.id == nil {
+		return nil, store.ErrNotFound
+	}
+	cp := *s.id
+	return &cp, nil
+}
+
+func (s *identityStore) Put(_ context.Context, id *store.CapsuleIdentity) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *id
+	if cp.CreatedAtUnix == 0 {
+		cp.CreatedAtUnix = time.Now().Unix()
+	}
+	s.id = &cp
+	return nil
+}
+
+type authKeyStore struct {
+	mu    sync.RWMutex
+	items map[string]*store.AuthorizedKey
+}
+
+func (s *authKeyStore) Add(_ context.Context, k *store.AuthorizedKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.items[k.Kid]; ok {
+		return store.ErrConflict
+	}
+	cp := *k
+	if cp.AddedAtUnix == 0 {
+		cp.AddedAtUnix = time.Now().Unix()
+	}
+	cp.Pubkey = append([]byte(nil), k.Pubkey...)
+	s.items[cp.Kid] = &cp
+	return nil
+}
+
+func (s *authKeyStore) Get(_ context.Context, kid string) (*store.AuthorizedKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	k, ok := s.items[kid]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := *k
+	cp.Pubkey = append([]byte(nil), k.Pubkey...)
+	return &cp, nil
+}
+
+func (s *authKeyStore) List(_ context.Context) ([]*store.AuthorizedKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*store.AuthorizedKey, 0, len(s.items))
+	for _, k := range s.items {
+		cp := *k
+		cp.Pubkey = append([]byte(nil), k.Pubkey...)
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].AddedAtUnix != out[j].AddedAtUnix {
+			return out[i].AddedAtUnix < out[j].AddedAtUnix
+		}
+		return out[i].Kid < out[j].Kid
+	})
+	return out, nil
+}
+
+func (s *authKeyStore) Delete(_ context.Context, kid string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.items, kid)
+	return nil
+}
+
+func (s *authKeyStore) Count(_ context.Context) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.items), nil
+}
+
+func (s *authKeyStore) DeleteAll(_ context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items = map[string]*store.AuthorizedKey{}
 	return nil
 }

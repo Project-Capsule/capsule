@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package capsule.v1;
+
+// IdentityService manages who is allowed to talk to this capsule. It is
+// the only service whose Adopt RPC is callable without an authenticated
+// JWT — and even Adopt is gated by a one-shot claim window that opens
+// only when no operator keys are enrolled. After adoption, every RPC
+// (here and on the other services) requires a bearer token signed by an
+// enrolled key.
+service IdentityService {
+  // Adopt enrolls the caller's public key as the first authorized key on
+  // a fresh capsule. Only callable while the claim window is open
+  // (capsule has zero enrolled keys AND boot-time timer hasn't expired).
+  // Closes the window on success. Returns the capsule's stable id and
+  // the SHA-256 fingerprint of its TLS leaf cert so the client can pin
+  // it for all subsequent dials.
+  rpc Adopt(AdoptRequest) returns (AdoptResponse);
+
+  // WhoAmI returns the caller's enrolled identity (kid + name) along
+  // with the capsule_id. Used by `capsulectl whoami` to confirm the
+  // local context is wired correctly.
+  rpc WhoAmI(WhoAmIRequest) returns (WhoAmIResponse);
+
+  // KeyAdd enrolls another operator's public key. Available to any
+  // already-enrolled caller (flat trust model).
+  rpc KeyAdd(KeyAddRequest) returns (KeyAddResponse);
+
+  // KeyList returns all enrolled keys (kid + metadata only — pubkey
+  // bytes are not surfaced over the wire).
+  rpc KeyList(KeyListRequest) returns (KeyListResponse);
+
+  // KeyRemove removes an enrolled key by kid. The server rejects the
+  // call when only one key remains (would lock the capsule out forever
+  // — operator must add a second key first or use the console RESET_AUTH
+  // procedure).
+  rpc KeyRemove(KeyRemoveRequest) returns (KeyRemoveResponse);
+}
+
+message AdoptRequest {
+  // Raw 32-byte Ed25519 public key.
+  bytes pubkey = 1;
+  // Operator-friendly label ("laptop", "ci", etc).
+  string name = 2;
+}
+
+message AdoptResponse {
+  // UUIDv4 stable id of this capsule. Goes into JWT `aud`.
+  string capsule_id = 1;
+  // base64url(sha256(pubkey)), no padding — the kid the server assigned.
+  string kid = 2;
+  // SHA-256 of the server's TLS leaf cert DER, hex-encoded. The client
+  // MUST cross-check this against the cert it saw on the wire to detect
+  // a MITM that returns a forged response from behind its own cert.
+  string tls_fingerprint_sha256 = 3;
+}
+
+message WhoAmIRequest {}
+
+message WhoAmIResponse {
+  string capsule_id = 1;
+  string kid = 2;
+  string name = 3;
+}
+
+// AuthorizedKey is the wire-side view of an enrolled key. Pubkey bytes
+// are intentionally absent — kid is the public identifier.
+message AuthorizedKey {
+  string kid = 1;
+  string name = 2;
+  string added_by_kid = 3;
+  int64 added_at_unix = 4;
+}
+
+message KeyAddRequest {
+  bytes pubkey = 1;
+  string name = 2;
+}
+
+message KeyAddResponse {
+  AuthorizedKey key = 1;
+}
+
+message KeyListRequest {}
+
+message KeyListResponse {
+  repeated AuthorizedKey keys = 1;
+}
+
+message KeyRemoveRequest {
+  string kid = 1;
+}
+
+message KeyRemoveResponse {}

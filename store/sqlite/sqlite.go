@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	capsulev1 "github.com/geekgonecrazy/capsule/models/capsule/v1"
 	"github.com/geekgonecrazy/capsule/store"
@@ -20,6 +22,8 @@ type Store struct {
 	workloads *workloadStore
 	volumes   *volumeStore
 	osState   *osStateStore
+	identity  *identityStore
+	authKeys  *authKeyStore
 }
 
 // Open opens (and creates if necessary) the SQLite database at path, runs
@@ -37,6 +41,8 @@ func Open(path string) (*Store, error) {
 	s.workloads = &workloadStore{db: db}
 	s.volumes = &volumeStore{db: db}
 	s.osState = &osStateStore{db: db}
+	s.identity = &identityStore{db: db}
+	s.authKeys = &authKeyStore{db: db}
 	return s, nil
 }
 
@@ -48,6 +54,12 @@ func (s *Store) Volumes() store.VolumeStore { return s.volumes }
 
 // OSState returns the OSStateStore. See store.Store.
 func (s *Store) OSState() store.OSStateStore { return s.osState }
+
+// Identity returns the IdentityStore. See store.Store.
+func (s *Store) Identity() store.IdentityStore { return s.identity }
+
+// AuthorizedKeys returns the AuthorizedKeyStore. See store.Store.
+func (s *Store) AuthorizedKeys() store.AuthorizedKeyStore { return s.authKeys }
 
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
@@ -74,6 +86,24 @@ func migrate(db *sql.DB) error {
 			last_good_slot        TEXT NOT NULL,
 			last_version          TEXT,
 			updated_at_unix       INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+		);`,
+		// Singleton row of capsule identity (UUIDv4 + adoption state).
+		// Seeded by capsuled on first boot if absent.
+		`CREATE TABLE IF NOT EXISTS capsule_identity (
+			singleton          INTEGER PRIMARY KEY CHECK (singleton = 1),
+			capsule_id         TEXT NOT NULL,
+			created_at_unix    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+			adopted_at_unix    INTEGER,
+			adopted_by_kid     TEXT
+		);`,
+		// Operator public keys allowed to mint JWTs for this capsule.
+		// kid is base64url(sha256(pubkey)) — a stable fingerprint.
+		`CREATE TABLE IF NOT EXISTS authorized_keys (
+			kid             TEXT PRIMARY KEY,
+			pubkey          BLOB NOT NULL,
+			name            TEXT NOT NULL,
+			added_by_kid    TEXT,
+			added_at_unix   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 		);`,
 	}
 	for _, s := range stmts {
@@ -247,5 +277,142 @@ func (s *workloadStore) List(ctx context.Context) ([]*capsulev1.Workload, error)
 
 func (s *workloadStore) Delete(ctx context.Context, name string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM workloads WHERE name = ?;`, name)
+	return err
+}
+
+type identityStore struct{ db *sql.DB }
+
+func (s *identityStore) Get(ctx context.Context) (*store.CapsuleIdentity, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT capsule_id, created_at_unix, adopted_at_unix, adopted_by_kid
+FROM capsule_identity WHERE singleton = 1;`)
+	var (
+		id        store.CapsuleIdentity
+		adoptedAt sql.NullInt64
+		adoptedBy sql.NullString
+	)
+	if err := row.Scan(&id.CapsuleID, &id.CreatedAtUnix, &adoptedAt, &adoptedBy); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	if adoptedAt.Valid {
+		id.AdoptedAtUnix = adoptedAt.Int64
+	}
+	if adoptedBy.Valid {
+		id.AdoptedByKid = adoptedBy.String
+	}
+	return &id, nil
+}
+
+func (s *identityStore) Put(ctx context.Context, id *store.CapsuleIdentity) error {
+	var adoptedAt, adoptedBy any
+	if id.AdoptedAtUnix != 0 {
+		adoptedAt = id.AdoptedAtUnix
+	}
+	if id.AdoptedByKid != "" {
+		adoptedBy = id.AdoptedByKid
+	}
+	createdAt := id.CreatedAtUnix
+	if createdAt == 0 {
+		createdAt = time.Now().Unix()
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO capsule_identity(singleton, capsule_id, created_at_unix, adopted_at_unix, adopted_by_kid)
+VALUES(1, ?, ?, ?, ?)
+ON CONFLICT(singleton) DO UPDATE SET
+    capsule_id      = excluded.capsule_id,
+    created_at_unix = excluded.created_at_unix,
+    adopted_at_unix = excluded.adopted_at_unix,
+    adopted_by_kid  = excluded.adopted_by_kid;
+`, id.CapsuleID, createdAt, adoptedAt, adoptedBy)
+	return err
+}
+
+type authKeyStore struct{ db *sql.DB }
+
+func (s *authKeyStore) Add(ctx context.Context, k *store.AuthorizedKey) error {
+	var addedBy any
+	if k.AddedByKid != "" {
+		addedBy = k.AddedByKid
+	}
+	addedAt := k.AddedAtUnix
+	if addedAt == 0 {
+		addedAt = time.Now().Unix()
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO authorized_keys(kid, pubkey, name, added_by_kid, added_at_unix)
+VALUES(?, ?, ?, ?, ?);
+`, k.Kid, k.Pubkey, k.Name, addedBy, addedAt)
+	if err != nil {
+		// modernc.org/sqlite returns the constraint error as a generic
+		// error string; the safest portable detection is on the message.
+		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "constraint") {
+			return store.ErrConflict
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *authKeyStore) Get(ctx context.Context, kid string) (*store.AuthorizedKey, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT kid, pubkey, name, added_by_kid, added_at_unix
+FROM authorized_keys WHERE kid = ?;`, kid)
+	var (
+		k       store.AuthorizedKey
+		addedBy sql.NullString
+	)
+	if err := row.Scan(&k.Kid, &k.Pubkey, &k.Name, &addedBy, &k.AddedAtUnix); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, store.ErrNotFound
+		}
+		return nil, err
+	}
+	if addedBy.Valid {
+		k.AddedByKid = addedBy.String
+	}
+	return &k, nil
+}
+
+func (s *authKeyStore) List(ctx context.Context) ([]*store.AuthorizedKey, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT kid, pubkey, name, added_by_kid, added_at_unix
+FROM authorized_keys ORDER BY added_at_unix, kid;`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*store.AuthorizedKey
+	for rows.Next() {
+		var (
+			k       store.AuthorizedKey
+			addedBy sql.NullString
+		)
+		if err := rows.Scan(&k.Kid, &k.Pubkey, &k.Name, &addedBy, &k.AddedAtUnix); err != nil {
+			return nil, err
+		}
+		if addedBy.Valid {
+			k.AddedByKid = addedBy.String
+		}
+		out = append(out, &k)
+	}
+	return out, rows.Err()
+}
+
+func (s *authKeyStore) Delete(ctx context.Context, kid string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM authorized_keys WHERE kid = ?;`, kid)
+	return err
+}
+
+func (s *authKeyStore) Count(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM authorized_keys;`).Scan(&n)
+	return n, err
+}
+
+func (s *authKeyStore) DeleteAll(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM authorized_keys;`)
 	return err
 }

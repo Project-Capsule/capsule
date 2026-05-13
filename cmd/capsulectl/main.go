@@ -19,8 +19,6 @@ import (
 
 	"golang.org/x/term"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
 	"google.golang.org/protobuf/encoding/protojson"
 	sigsyaml "sigs.k8s.io/yaml"
 
@@ -29,13 +27,16 @@ import (
 
 func main() {
 	// Global flags first: --capsule host:port. Then subcommand and its args.
-	// CAPSULE_HOST env var sets the default so daily use doesn't repeat it.
+	// --capsule resolves in this order:
+	//   1. explicit --capsule <name|host:port> on the command line
+	//   2. $CAPSULE_HOST (same accepted forms)
+	//   3. the current context from ~/.config/capsule/config.yaml
+	//      (set by `capsulectl context use <name>` or by `capsulectl adopt`)
+	// Empty default lets the resolver fall through to the current context.
 	global := flag.NewFlagSet("capsulectl", flag.ExitOnError)
-	defaultAddr := os.Getenv("CAPSULE_HOST")
-	if defaultAddr == "" {
-		defaultAddr = "localhost:50000"
-	}
-	addr := global.String("capsule", defaultAddr, "capsule gRPC address (overrides $CAPSULE_HOST)")
+	global.Usage = usage
+	addr := global.String("capsule", os.Getenv("CAPSULE_HOST"),
+		"context name OR host:port (overrides $CAPSULE_HOST; falls back to the current context)")
 	if err := global.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -44,6 +45,23 @@ func main() {
 	// dispatch it before the group+cmd switch.
 	if len(rest) >= 1 && rest[0] == "cp" {
 		if err := runCp(*addr, rest[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	// `adopt` and `whoami` are top-level verbs too; adopt because it's
+	// the very first call (no context yet), whoami because it reads
+	// nicely as a single word.
+	if len(rest) >= 1 && rest[0] == "adopt" {
+		if err := runAdopt(*addr, rest[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(rest) >= 1 && rest[0] == "whoami" {
+		if err := runWhoAmI(*addr); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
@@ -179,6 +197,39 @@ func main() {
 			break
 		}
 		err = volumeDelete(*addr, fs.Arg(0), *force)
+	case "key add":
+		fs := flag.NewFlagSet("key add", flag.ExitOnError)
+		name := fs.String("name", "", "operator-friendly label for the key")
+		_ = fs.Parse(subArgs)
+		if fs.NArg() < 1 || *name == "" {
+			err = errors.New("key add requires --name <label> <pubkey-file>")
+			break
+		}
+		err = runKeyAdd(*addr, fs.Arg(0), *name)
+	case "key list":
+		err = runKeyList(*addr)
+	case "key rm":
+		if len(subArgs) < 1 {
+			err = errors.New("key rm requires a kid")
+			break
+		}
+		err = runKeyRemove(*addr, subArgs[0])
+	case "key show":
+		err = runKeyShow(*addr)
+	case "context list":
+		err = runContextList()
+	case "context use":
+		if len(subArgs) < 1 {
+			err = errors.New("context use requires a name")
+			break
+		}
+		err = runContextUse(subArgs[0])
+	case "context rm":
+		if len(subArgs) < 1 {
+			err = errors.New("context rm requires a name")
+			break
+		}
+		err = runContextRemove(subArgs[0])
 	case "image list":
 		err = imageList(*addr)
 	case "image push":
@@ -234,50 +285,76 @@ func main() {
 func usage() {
 	fmt.Fprint(os.Stderr, `capsulectl — capsule control CLI
 
-Set CAPSULE_HOST in your environment to skip --capsule.
+Targeting a capsule (in priority order):
+  --capsule <name|host:port>     pass on any command
+  $CAPSULE_HOST                  same forms; defaults --capsule
+  current context                set by adopt or "context use"
 
-Usage:
-  capsulectl [--capsule host:port] apply -f <manifest.yaml>     # any kind: Container/MicroVM/Volume
-  capsulectl [--capsule host:port] capsule info
-  capsulectl [--capsule host:port] capsule logs [-f] [-n N]
-  capsulectl [--capsule host:port] capsule update push <bundle.tar> [--auto-confirm=N]
-  capsulectl [--capsule host:port] capsule update confirm
-  capsulectl [--capsule host:port] capsule debug [-i <image>] [--keep] [-- <cmd> [args...]]
-  capsulectl [--capsule host:port] workload list
-  capsulectl [--capsule host:port] workload get <name>
-  capsulectl [--capsule host:port] workload delete <name>
-  capsulectl [--capsule host:port] workload restart <name>
-  capsulectl [--capsule host:port] workload stop <name>
-  capsulectl [--capsule host:port] workload start <name>
-  capsulectl [--capsule host:port] workload logs [-f] [-n N] [--serial] <name>
-  capsulectl [--capsule host:port] workload exec [-t] <name> -- <cmd> [args...]
-  capsulectl [--capsule host:port] cp <src> <dst>                # files/dirs to or from a workload
-  capsulectl [--capsule host:port] volume create [--size 10GiB] <name>
-  capsulectl [--capsule host:port] volume list
-  capsulectl [--capsule host:port] volume get <name>
-  capsulectl [--capsule host:port] volume delete [--force] <name>
-  capsulectl [--capsule host:port] volume resize <name> <size>
-  capsulectl [--capsule host:port] image list
-  capsulectl [--capsule host:port] image push <tarball>             # '-' = stdin (pipe 'docker save')
+Adoption + identity:
+  adopt --capsule <host:port> [--name <ctx>] [--yes]   claim a fresh capsule
+  whoami                                               who am I on the current capsule
+  key add --name <label> <pubkey.ed25519>              enroll another operator's pubkey
+  key list                                             list enrolled keys
+  key rm <kid>                                         remove an enrolled key
+  key show                                             print this client's pubkey + kid
+  context list                                         list known capsules
+  context use <name>                                   set the default context
+  context rm <name>                                    forget a context
+
+Capsule:
+  capsule info
+  capsule logs [-f] [-n N]
+  capsule update push <bundle.tar> [--auto-confirm=N]
+  capsule update confirm
+  capsule debug [-i <image>] [--keep] [-- <cmd> [args...]]
+
+Workloads:
+  apply -f <manifest.yaml>                             any kind: Container/MicroVM/Volume
+  workload list
+  workload get <name>
+  workload delete <name>
+  workload restart|stop|start <name>
+  workload logs [-f] [-n N] [--serial] <name>
+  workload exec [-t] <name> -- <cmd> [args...]
+  cp <src> <dst>                                       files/dirs to or from a workload
+
+Volumes:
+  volume create [--size 10GiB] <name>
+  volume list
+  volume get <name>
+  volume delete [--force] <name>
+  volume resize <name> <size>
+
+Images:
+  image list
+  image push <tarball>                                 '-' = stdin (pipe 'docker save')
 `)
 }
 
+// dial resolves --capsule (a context name OR a host:port) against the
+// local config registry and opens an authenticated, TLS-pinned
+// connection. There is no plaintext / insecure fallback; if the
+// operator hasn't adopted, they're told how.
+//
+// Server-side keepalive parameters: MinTime in router.go is 10s, so we
+// must stay >= 10s here or pings get rejected. PermitWithoutStream
+// lets the client notice a capsule reboot even between RPCs.
 func dial(addr string) (*grpc.ClientConn, error) {
-	// Keepalive: ping every 15 s during a stream and consider the
-	// connection dead if no ack within 10 s. Without this, long-running
-	// streams (logs -f, exec) just hang in Recv() forever when the
-	// capsule reboots or the network drops — the OS won't notice the
-	// dead TCP connection for ages. PermitWithoutStream lets us catch a
-	// reboot even between RPCs. Time must stay >= the server's
-	// EnforcementPolicy.MinTime (router.go) or pings get rejected.
-	return grpc.NewClient(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                15 * time.Second,
-			Timeout:             10 * time.Second,
-			PermitWithoutStream: true,
-		}),
-	)
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	cctx, err := cfg.Resolve(addr)
+	if err != nil {
+		hint := addr
+		if hint == "" {
+			hint = "<addr>"
+		}
+		return nil, fmt.Errorf(
+			"no enrolled context for %q. If this is a fresh capsule, run: capsulectl adopt --capsule %s",
+			addr, hint)
+	}
+	return dialAuth(cctx)
 }
 
 func withCtx(fn func(ctx context.Context) error) error {
