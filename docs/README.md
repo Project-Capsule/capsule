@@ -16,6 +16,14 @@ This folder is the operator's manual.
 - **[updates.md](updates.md)** — A/B OS updates: how `capsule update push` ships a new bundle, the tentative-commit window, and automatic rollback.
 - **[operations.md](operations.md)** — Breakglass runbooks: growing the PERM partition, debug-container gotchas, and other things that don't (yet) have a first-class verb.
 
+## Proposals
+
+- **[encrypted-volumes.md](encrypted-volumes.md)** — Per-volume LUKS2 encryption with TPM-sealed master key, recovery codes, and the full failure-mode matrix. Status: proposal.
+- **[external-disks.md](external-disks.md)** — Pools as a first-class concept: attach / adopt / detach secondary and external (USB) disks, with optional whole-pool or per-volume encryption. Status: proposal.
+- **[pci-devices.md](pci-devices.md)** — Operator-registered device passthrough for containers (GPUs, FPGAs, USB-serial). v1 is containers-only; microVM passthrough via smolvm/libkrun is sketched as follow-up. Status: proposal.
+- **[fabric.md](fabric.md)** — A WireGuard mesh between capsules: fabric IPs for containers and microVMs in `100.64.0.0/10`, declarative per-workload allow-list policy, default-deny. Operator-driven enrollment, no central control plane. Status: proposal.
+- **[edge.md](edge.md)** — Exposing fabric workloads to the public internet: an edge capsule with a public IP runs a managed Caddy, terminates TLS, routes into the fabric. Direct DNS or behind a cloud LB / CDN. ACME auto + DNS-01 + manual cert modes. Status: proposal. Builds on the fabric proposal. 
+
 ## Vocabulary
 
 - **Capsule** — the OS. A machine running Capsule is also called *a capsule* (same noun for OS + instance).

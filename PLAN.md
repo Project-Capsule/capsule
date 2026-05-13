@@ -6,21 +6,35 @@ Where Capsule is, where it's going, and the gotchas that need cleaning up before
 
 Walk this checklist top-to-bottom on a running capsule and every item is a green light:
 
-- **Boot** — `make image && make qemu`; `capsuled` runs as PID 1, mounts /perm, brings up eth0, supervises containerd, listens on :50000.
+- **Boot** — `make image && make qemu`; `capsuled` runs as PID 1, mounts /perm, brings up eth0, supervises containerd, listens on :50000 over TLS 1.3.
+- **Auth (mTLS + adopt + EdDSA JWT)** — `capsuled` generates `/perm/tls/server.{crt,key}` on first boot; `capsulectl adopt <host>` pins the server fingerprint TOFU and enrolls the operator's pubkey via the boot-time claim window (zero keys + 30-min timer). Every subsequent RPC requires a per-call EdDSA JWT; replay-protected by a JTI cache. `auth/doc.go` is the source of truth.
 - **Containers** — `capsulectl apply -f` → `containerd` pulls + runs. Host networking works. Bridge networking via CNI works with port mappings (container port ↔ host port via CNI portmap plugin).
 - **MicroVMs** — Firecracker-backed, smolvm-style: shared rootfs + per-VM OCI payload ext4 + vsock agent. `capsulectl exec -t alpine-vm -- /bin/sh` gives you a real interactive shell inside runc inside the VM. `--serial` streams kernel+firecracker output for debugging.
 - **MicroVM port mapping** — iptables DNAT tagged with `capsule-vm:<workload>` comment; teardown finds + removes. Tested with nginx on :8080 reachable via curl.
 - **MicroVM NAT / DNS** — MASQUERADE rule for `172.20.0.0/16`; capsule-guest injects a default `/etc/resolv.conf` (`1.1.1.1`, `8.8.8.8`) into the OCI payload if absent.
 - **Volumes, unified** — thin LVs in VG `capsule` at `/dev/capsule/vol-<name>`, ext4 formatted. Containers mount directly; VMs attach as virtio-blk. Same block device, one mounter at a time.
-- **Storage substrate** — `/perm` is a plain LV in the capsule VG; user volumes are thin LVs in the sibling `thinpool`. VG is initialized on first boot if the PERM partition is blank. (VM payload disks are still flatten-to-ext4 today; unifying them into the thin pool is tracked in PLAN §4.)
+- **Storage substrate** — `/perm` is a plain LV in the capsule VG; user volumes are thin LVs in the sibling `thinpool`. VG is initialized on first boot if the PERM partition is blank. (VM payload disks are still flatten-to-ext4 today; unifying them into the thin pool is tracked in Next §2.)
 - **Lifecycle** — `workload stop / start / restart`; `desired_state=STOPPED` persists across capsule reboots.
 - **Logs + Exec** — container workloads via containerd; MicroVM workloads via the vsock agent (`capsule.v1.GuestAgent`). Same `capsulectl` commands, kind-transparent.
 - **`workload cp`** — scp-style file/directory copy in and out of containers and MicroVMs (kubectl-style tar-pipe through Exec; see "Gotchas" below for the rewrite tracked).
 - **Persistence** — SQLite at `/perm/state.db`. Workloads + volumes survive capsule reboots.
+- **Reconciler spec-drift detection** — `apply -f` on a workload whose spec changed (image, command, env, mounts, etc.) recreates the workload instead of silently keeping the old container/VM. The drift check lives in `core/reconciler/`.
+- **Image push (side-loading)** — `capsulectl image push <docker-save.tar | oci-tar>` streams an image into containerd's local cache. Lets workloads run without a reachable registry (air-gapped, private images, etc.). `capsulectl image list` shows the cache.
+- **Per-capsule hostname** — `/perm/capsule/hostname` if set; otherwise derived from the primary MAC. Survives A/B slot flips because it lives on `/perm`, not the rootfs.
 - **A/B OS updates** — `capsulectl capsule update push <bundle.tar>` streams a new rootfs+kernel+initramfs to the inactive slot, GRUB flips active, capsule reboots; tentative-commit on first successful boot, auto-rollback to the known-good slot on health failure. `update confirm` locks it in.
 - **Breakglass / debug** — `capsulectl capsule debug` deploys a privileged container with host PID + bind-mounted `/dev` + `/sys` + `/perm` + `/sbin`/`/usr/sbin`/`/usr/bin`, drops you into an interactive shell, cleans up on exit (or `--keep`).
 - **System introspection** — `capsulectl capsule info` (hostname, kernel, uptime, CPU, memory, boot disk, thinpool fill %), `capsulectl capsule logs -f` (tails `capsuled`'s own slog over gRPC, no SSH needed).
 - **Real hardware** — boots end-to-end on Beelink (Intel Jasper Lake) with UEFI, AHCI/SATA M.2 SSDs, and the linux-lts 6.18 kernel. Same image boots under QEMU.
+
+## Proposals
+
+Designs we've committed to *on paper* but not yet started building. Each is its own doc under `docs/`; read before touching the relevant code area.
+
+- **[docs/encrypted-volumes.md](docs/encrypted-volumes.md)** — Per-volume LUKS2 with a TPM-sealed node master, recovery codes printed once at create/init. The full failure-mode matrix is in the doc.
+- **[docs/external-disks.md](docs/external-disks.md)** — Pools as a first-class concept: attach / adopt / detach secondary and external (USB) disks, with optional whole-pool or per-volume encryption. Companion to encrypted-volumes.
+- **[docs/pci-devices.md](docs/pci-devices.md)** — Operator-registered device passthrough for containers (GPUs, FPGAs, USB-serial). v1 is containers-only; microVM passthrough waits on a non-Firecracker backend (see Next #7).
+- **[docs/fabric.md](docs/fabric.md)** — A WireGuard mesh between capsules with declarative per-workload allow-list policy. Stable cross-host workload IPs in `100.64.0.0/10`. Default-deny. Operator-driven enrollment, no central control plane.
+- **[docs/edge.md](docs/edge.md)** — Exposing fabric workloads to the public internet via a capsule-managed Caddy. Direct DNS or behind a cloud LB / CDN. Builds on the fabric proposal.
 
 ## Next (in rough priority order)
 
@@ -40,16 +54,7 @@ For single-tenant homelab the current setup is fine. This matters most if/when w
 
 Expose `resources: { cpuMillis, memoryMib, pidsMax }` in `MicroVMSpec`. Translate to `linux.resources` in the OCI config `capsule-guest` writes. runc already enforces. Kubernetes-style limits without the indirection.
 
-### 2. mTLS bootstrap
-
-Today `:50000` is plaintext gRPC. For anything on a real network:
-- `capsuled` on first boot generates a cert at `/perm/tls/`, prints its SHA-256 fingerprint on the serial console.
-- `capsulectl trust add <fingerprint>` → stored in `~/.config/capsule/trusted-hosts.yaml`.
-- gRPC dialer pins the fingerprint; rotates if the server presents a different one.
-
-Matches Talos's model. ~half-day.
-
-### 3. Unify VM payload disks with the LVM thin pool
+### 2. Unify VM payload disks with the LVM thin pool
 
 **Natural follow-up to the LVM thin migration** — the user-volume half landed and was verified end-to-end on the VPS; the VM-payload half was explicitly deferred because of a containerd/LVM ownership clash documented below. Pick this up when you're next in the storage code; ~2 days of work on top of the groundwork already in place.
 
@@ -59,7 +64,7 @@ Blocker: containerd's devmapper snapshotter wants to own a thin pool's device-id
 
 Scope: rework `boot/boot_linux.go:initializeCapsuleVG` to create raw `thinmeta`/`thindata` LVs and then `dmsetup create capsule-thinpool` over them. Re-enable devmapper as default snapshotter in `image/etc/containerd-config.toml`. Revert `runtime/microvm/firecracker/image.go:preparePayloadDisk` to the snapshot-prepare path (git history has the version — the commit that this note first appeared in also contains the snapshot-based implementation that was reverted). Re-verify end-to-end on the VPS with two identical alpine VMs: the second should boot under 5 s and `lvs` should show the thin pool dedup'ing extents.
 
-### 4. Volume data lifecycle (builds on LVM thin)
+### 3. Volume data lifecycle (builds on LVM thin)
 
 Now that `/perm` is an LVM thin pool and every volume is a thin LV, snapshot/backup/migration is mostly plumbing over existing LVM primitives. Rough order:
 
@@ -67,29 +72,33 @@ Now that `/perm` is an LVM thin pool and every volume is a thin LV, snapshot/bac
 - **Phase C — Offline export/import.** `capsulectl volume export <vol> [--snapshot]` → snapshot then stream `dd | zstd` to stdout or an image file. Matching `volume import <name> <file>`. Covers the 90% "back this up somewhere" case — no new daemons, just shell-out pipelines.
 - **Phase D — Cross-capsule live migration (dm-clone + iSCSI).** Source exports the snapshot as an iSCSI LUN; destination stacks `dm-clone` over an empty LV with the iSCSI export as the remote source. VM boots immediately on the destination; blocks hydrate in the background. DISCARD pass-through on the guest short-circuits empty space. This is fly.io's machine-migration mechanism. ~2-3 weeks of real work, wait until there's actually a second capsule to migrate between.
 
-### 5. Low-priority cleanup
+Adjacent, scoped-out as separate proposals: **at-rest encryption** ([docs/encrypted-volumes.md](docs/encrypted-volumes.md)) layers LUKS2 per-volume with a TPM-sealed node master, and **multi-disk pools** ([docs/external-disks.md](docs/external-disks.md)) makes the second/external disk a first-class operator concept. Both are independent from this lifecycle work — read the proposals before designing snapshot/export wire formats so the same keys carry through.
+
+### 4. Low-priority cleanup
 
 Accumulated lint/dead code spotted in passing. Batch into a single cleanup PR when someone's in the area:
 - `runtime/container/driver.go` — unused `errNotFound` sentinel near EOF; unused `_ = strings.ToLower` import-suppression hack above it.
 - `boot/boot_linux.go:38` — `initPlatform(ctx)` takes a `context.Context` that's no longer used; either use it or drop it.
 - `boot/boot_linux.go:279` — switch `strings.Split` → `strings.SplitSeq` per analyzer (Go 1.25+ perf nit).
 
-### 6. CLI polish
+### 5. CLI polish
 
 - `capsulectl workload list` should show declared port mappings (today they're only in `workload get`).
 - `capsulectl workload get` could print a human-friendly summary on top of the JSON.
 - `capsulectl volume mount <name> <path>` — mount a volume LV on the capsule shell for inspection without a workload.
 - `--wait` flag on `apply` / `start` / `restart` — block until phase=Running.
 
-### 7. Fleet / multi-capsule CLI
+### 6. Fleet / multi-capsule CLI
 
-`capsulectl --capsule a.example.com,b.example.com workload list` — sequential fan-out, tabled output. `~/.config/capsule/config.yaml` with named capsules. Not a cluster yet, just fleet-of-identicals.
+`capsulectl --capsule a.example.com,b.example.com workload list` — sequential fan-out, tabled output. The named-capsules half of this already shipped with the auth work (`~/.config/capsule/config.yaml` with named contexts; `--capsule` resolves "name | host:port | $CAPSULE_HOST | current context"). What's missing is **fan-out** across multiple targets in one command, and the cross-capsule workload reachability story.
 
-### 8. Alternate MicroVM backends
+The reachability piece is its own proposal: [docs/fabric.md](docs/fabric.md) — a WireGuard mesh between capsules with declarative per-workload allow-list policy. And the natural follow-up, [docs/edge.md](docs/edge.md), exposes fabric workloads to the public internet via a Caddy-on-Capsule edge. Fleet fan-out at the CLI layer and the fabric at the network layer are independent work — either can ship first — but they meet at `capsulectl fabric enroll <a> <b>`, which is the first CLI verb that takes two capsules.
 
-Reserved slots in `MicroVMBackend`: `SMOLVM`, `QEMU`. Adding a QEMU driver unlocks **virtiofs** for volume sharing (if we ever want it) and **PCI passthrough** (for GPU/NIC workloads on real hardware).
+### 7. Alternate MicroVM backends
 
-### 9. Prebuilt capsule-debug image
+Reserved slots in `MicroVMBackend`: `SMOLVM`, `QEMU`. Adding a QEMU driver unlocks **virtiofs** for volume sharing (if we ever want it) and **PCI passthrough** (for GPU/NIC workloads on real hardware). The motivating use case and the operator-facing shape are designed in [docs/pci-devices.md](docs/pci-devices.md) — v1 of that proposal is containers-only specifically because Firecracker has no PCI bus; bringing up smolvm/libkrun is what unblocks microVM passthrough.
+
+### 8. Prebuilt capsule-debug image
 
 `capsulectl capsule debug` currently uses `alpine:3.20` and tells the operator to `apk add lvm2 e2fsprogs iptables iproute2` once they're inside. That works (lvm2 etc. happily talk to the host's LVM via the bind-mounted /dev + /sys + /perm) but adds 5–10 seconds to the first session and needs network access to dl-cdn.alpinelinux.org. Replace with a small purpose-built image we publish to a registry — `ghcr.io/<org>/capsule-debug:<version>` — with the toolchain baked in: `lvm2`, `e2fsprogs`, `iptables`, `iproute2`, `util-linux`, `blkid`, `strace`, `tcpdump`, `lsof`, plus host bin compatibility (the bind-mounted host /sbin/lvs etc. work directly when the image's libdir matches Alpine's). Make the default image override-able with `--image` so operators can use their own. Keep the alpine fallback documented for air-gapped environments.
 
@@ -102,6 +111,7 @@ Things that currently work but are brittle, hacky, or "good enough for now."
 - **VM IP allocation** is hash-of-workload-name → `172.20.254.X`, X = `(hash % 252) + 2`. Collisions possible above ~20 VMs. Swap for a real IPAM that tracks allocations in sqlite.
 - **MASQUERADE is a blanket rule** on all traffic leaving the capsule. Fine for homelab; needs narrowing if Capsule ever lives on a shared L2.
 - **Port mapping doesn't consider conflicts.** Two VMs both declaring `hostPort: 8080` will both install DNAT rules; whichever got there first wins. Validate at Apply time.
+- **No cross-capsule reachability for workloads.** Each capsule's `br0` is a private island. The design for fixing this lives in [docs/fabric.md](docs/fabric.md) (WireGuard mesh + per-workload policy) and the public-exposure half in [docs/edge.md](docs/edge.md). Both are still proposals, not implementation.
 
 ### MicroVM lifecycle
 
@@ -117,6 +127,7 @@ Things that currently work but are brittle, hacky, or "good enough for now."
 - **`volume delete` after a crashed workload** may leave `/run/capsule/mounts/<workload>/` dirs. `unmountContainerVolumes` best-effort cleans these.
 - **Thin pool exhaustion is fatal.** Overcommitted volumes + a guest that fills one → pool ENOSPC → writes to *every* thin LV in the pool start failing. Need to configure `thin_pool_autoextend_threshold` / `thin_pool_autoextend_percent` in `/etc/lvm/lvm.conf` and expose pool fill % as a capsule metric. Capsule doesn't yet.
 - **Volume resize is grow-only.** `resize2fs` can shrink ext4 but requires `e2fsck -f` first and is dangerous; not exposed. Must be detached — the `refsTo` check enforces this.
+- **Volumes are unencrypted at rest.** A stolen disk reveals everything. The fix is designed in [docs/encrypted-volumes.md](docs/encrypted-volumes.md) (LUKS2 + TPM-sealed node master + per-volume + master recovery codes); the secondary-disk story builds on top in [docs/external-disks.md](docs/external-disks.md). Both still proposals.
 
 ### Build / dev loop
 
@@ -139,9 +150,10 @@ Things that currently work but are brittle, hacky, or "good enough for now."
 
 ### Security
 
-- **No authN/Z at all.** The capsule is open on :50000. See Next #3 for the mTLS plan.
+- **mTLS + EdDSA JWT shipped** — see the "What's working today" entry. Trust boundary is now the operator's pubkey + the pinned server fingerprint. Keys live at `/perm/tls/server.{crt,key}`; authorized operator pubkeys live in SQLite.
+- **PCI/GPU passthrough for containers** is designed in [docs/pci-devices.md](docs/pci-devices.md) but not yet implemented. Today there is no way to give a workload host hardware beyond standard `/dev` nodes.
 - **Workloads run as root inside the container by default.** User namespaces are doable via runc config but not wired. Acceptable for homelab; revisit if multi-tenant.
-- **`/perm/tls/` doesn't exist yet.** When mTLS lands, this path is where keys live.
+- **`capsulectl capsule debug` deploys a privileged container with host PID + host mount + bind-mounted `/dev` + `/sys` + `/perm`** — anyone with operator credentials can compromise the host. mTLS + the authorized-keys table is the only gate; treat operator JWT loss as full-host compromise.
 
 ## Anti-goals
 
@@ -150,4 +162,4 @@ Things people ask for that are intentionally out of scope for Capsule:
 - **Kubernetes compatibility.** Capsule is a smaller shape on purpose. If you want k8s, run k3s inside a capsule.
 - **Autoscaling.** That's the future orchestrator's job, not the capsule's.
 - **Web UI.** Capsule is CLI / API first; a UI on top is welcome as a separate project.
-- **Cluster gossip in v1.** Each capsule is its own island. The operator's CLI fans out; no peer-to-peer discovery.
+- **Cluster gossip / auto-discovery.** Capsules never advertise themselves to a discovery bus, never auto-join a cluster, never elect leaders. The fabric proposal ([docs/fabric.md](docs/fabric.md)) adds operator-driven peering between capsules (encrypted, point-to-point WireGuard) but is explicit about *not* doing gossip — peers are added by `capsulectl fabric enroll`, not by broadcasting. The CLI fans out to the fleet; nothing on the network does.
