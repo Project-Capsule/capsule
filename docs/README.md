@@ -18,6 +18,8 @@ This folder is the operator's manual.
 
 ## Proposals
 
+- **[discovery.md](discovery.md)** — mDNS-based discovery of capsules on the LAN: `_capsule._tcp` service announcements, stable short IDs (`capsule-a3f2`) shown on HDMI, `capsulectl discover` and `discover --adopt` for fleet bringup. Status: proposal.
+- **[install.md](install.md)** — One-pass bare-metal install: same `disk.raw` boots into installer mode when on USB, mDNS-announces as pending install, `capsulectl install <short-id>` drives the flash and seals the operator's pubkey so the disk comes up already adopted. Replaces today's USB-boot-then-debug-`dd`-then-re-adopt dance. Status: proposal. **Pulls in discovery's mDNS announcer, short IDs, and `discover` browse command as required foundations** (see install.md for the precise required-vs-optional split); discovery's `--adopt` walkthrough and `set-hostname` are not required and can land separately.
 - **[encrypted-volumes.md](encrypted-volumes.md)** — Per-volume LUKS2 encryption with TPM-sealed master key, recovery codes, and the full failure-mode matrix. Status: proposal.
 - **[external-disks.md](external-disks.md)** — Pools as a first-class concept: attach / adopt / detach secondary and external (USB) disks, with optional whole-pool or per-volume encryption. Status: proposal.
 - **[pci-devices.md](pci-devices.md)** — Operator-registered device passthrough for containers (GPUs, FPGAs, USB-serial). v1 is containers-only; microVM passthrough via smolvm/libkrun is sketched as follow-up. Status: proposal.
