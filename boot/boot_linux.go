@@ -112,6 +112,7 @@ func initPlatform(ctx context.Context) (Result, error) {
 
 	if err := mountPerm(); err != nil {
 		slog.Error("failed to mount /perm", "err", err)
+		res.MountPermErr = err.Error()
 	} else {
 		res.MountedPerm = true
 	}

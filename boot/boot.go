@@ -15,6 +15,11 @@ import (
 type Result struct {
 	// MountedPerm is true if the /perm partition was mounted successfully.
 	MountedPerm bool
+	// MountPermErr carries the mountPerm error message when MountedPerm
+	// is false on a real (A/B-slot) boot. Surfaced on the HDMI banner so
+	// the operator immediately sees why state is broken rather than
+	// thinking they're looking at a brand-new claim-window capsule.
+	MountPermErr string
 	// ActiveSlot is "slot_a" / "slot_b" on a real (Linux PID-1) boot, set
 	// from the `capsule.slot=a|b` token on the kernel cmdline (written by
 	// the bootloader's per-slot menuentry). Empty in dev mode (running off
@@ -67,11 +72,12 @@ type BannerInfo struct {
 	InstallerMode bool
 	TargetDisk    string // "/dev/nvme0n1"; only used when InstallerMode is true
 	TargetSize    string // human-formatted ("512 GB"); only used when InstallerMode is true
-	// StoreBroken signals that /perm was mounted but SQLite refused to
-	// open — capsuled fell back to an in-memory store and the claim
-	// window was NOT opened. The banner switches to a recovery template
-	// so the operator immediately knows this is not a normal "awaiting
-	// adoption" state.
+	// StoreBroken signals that this is an A/B install where capsuled
+	// couldn't reach persistent state — /perm mount failed, or SQLite
+	// refused to open. capsuled fell back to an in-memory store and
+	// the claim window is NOT opened. The banner switches to a
+	// recovery template so the operator immediately knows this is not
+	// a normal "awaiting adoption" state.
 	StoreBroken bool
 	StoreError  string
 }
