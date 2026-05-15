@@ -106,6 +106,12 @@ type CapsuleIdentity struct {
 	// JWT audience so a token minted for capsule A can't be replayed at
 	// capsule B even if the operator is enrolled on both.
 	CapsuleID string
+	// ShortID is a human-memorable handle derived from the first 4 bytes
+	// of CapsuleID ("capsule-a3f2"). Stable across reboots and updates.
+	// Surfaced in the HDMI banner, mDNS announcement, and `capsulectl
+	// discover` output so operators can correlate a physical machine
+	// with a CLI entry without comparing fingerprints byte-by-byte.
+	ShortID string
 	// CreatedAtUnix is when the identity row was first written.
 	CreatedAtUnix int64
 	// AdoptedAtUnix is when the first authorized key was enrolled. Zero

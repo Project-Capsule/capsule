@@ -61,6 +61,11 @@ type GetInfoResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Hostname as reported by the kernel.
 	Hostname string `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	// Stable short handle derived from capsule_id ("capsule-a3f2").
+	// Shown on the HDMI banner and in `capsulectl discover` output so
+	// operators can correlate a physical machine with a CLI entry without
+	// typing a UUID. Empty on pre-short_id capsules until they reboot.
+	ShortId string `protobuf:"bytes,22,opt,name=short_id,json=shortId,proto3" json:"short_id,omitempty"`
 	// Kernel release string (uname -r).
 	KernelRelease string `protobuf:"bytes,2,opt,name=kernel_release,json=kernelRelease,proto3" json:"kernel_release,omitempty"`
 	// Kernel version string (uname -v).
@@ -150,6 +155,13 @@ func (*GetInfoResponse) Descriptor() ([]byte, []int) {
 func (x *GetInfoResponse) GetHostname() string {
 	if x != nil {
 		return x.Hostname
+	}
+	return ""
+}
+
+func (x *GetInfoResponse) GetShortId() string {
+	if x != nil {
+		return x.ShortId
 	}
 	return ""
 }
@@ -689,9 +701,10 @@ const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\n" +
 	"\x18capsule/v1/capsule.proto\x12\n" +
 	"capsule.v1\"\x10\n" +
-	"\x0eGetInfoRequest\"\xcb\x06\n" +
+	"\x0eGetInfoRequest\"\xe6\x06\n" +
 	"\x0fGetInfoResponse\x12\x1a\n" +
-	"\bhostname\x18\x01 \x01(\tR\bhostname\x12%\n" +
+	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x19\n" +
+	"\bshort_id\x18\x16 \x01(\tR\ashortId\x12%\n" +
 	"\x0ekernel_release\x18\x02 \x01(\tR\rkernelRelease\x12%\n" +
 	"\x0ekernel_version\x18\x03 \x01(\tR\rkernelVersion\x12\"\n" +
 	"\farchitecture\x18\x04 \x01(\tR\farchitecture\x12%\n" +

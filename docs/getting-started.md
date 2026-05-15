@@ -54,15 +54,37 @@ You should see GRUB → kernel → `[capsuled]` log lines on the serial console.
 
 If your OVMF firmware lives somewhere other than `/opt/homebrew/share/qemu/`, override `OVMF_CODE=` / `OVMF_VARS=` on the make line.
 
-### Option 2 — real hardware (USB or NVMe)
+### Option 2 — real hardware via USB installer (recommended)
 
-`build/disk.raw` is a complete bootable disk. Write it to a USB stick or the target machine's internal disk:
+`build/disk.raw` is both the runtime image and the installer. Write it to a USB stick once, then plug it into each target machine.
+
+```sh
+sudo dd if=build/disk.raw of=/dev/<usb> bs=4M status=progress conv=fsync
+```
+
+When the USB boots on a machine with at least one viable internal disk, capsuled detects installer mode automatically: it announces itself over mDNS as a pending install and shows an `INSTALLER` banner on HDMI with the target disk and a `capsule-XXXX` short ID. On your laptop:
+
+```sh
+# Discover any capsules / installers on the LAN.
+./build/capsulectl discover
+
+# Drive the install. Captures the installer's TLS fingerprint, generates
+# an operator keypair, seeds the operator's pubkey onto the target disk's
+# /perm so the disk comes up already adopted.
+./build/capsulectl install capsule-a3f2 --name nuc-1
+```
+
+When the install finishes, pull the USB and power-cycle. The disk-booted capsule comes up already enrolled as the `nuc-1` context — no second adopt round. See [install.md](install.md) for the full design.
+
+### Option 3 — real hardware via direct `dd` (advanced)
+
+For OS development or when you can physically extract the internal disk, `dd` works straight onto whatever block device:
 
 ```sh
 sudo dd if=build/disk.raw of=/dev/<target> bs=4M status=progress conv=fsync
 ```
 
-Plug the USB into a UEFI-capable machine, boot from it (you may need to enable UEFI boot in the firmware menu), and watch HDMI for the ASCII `CAPSULE` banner — it prints the DHCP'd IP a few seconds after kernel hands off.
+Plug the disk back in, boot, and run `capsulectl adopt --capsule <ip>:50000` against the IP shown on the HDMI banner. Slower than Option 2 because adoption is a separate round-trip; useful when you don't want the installer flow in the loop.
 
 > **Note:** Capsule needs UEFI. Legacy/CSM BIOS won't load GRUB EFI from the ESP.
 

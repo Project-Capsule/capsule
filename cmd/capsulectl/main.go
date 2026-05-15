@@ -67,6 +67,20 @@ func main() {
 		}
 		return
 	}
+	if len(rest) >= 1 && rest[0] == "discover" {
+		if err := runDiscover(rest[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(rest) >= 1 && rest[0] == "install" {
+		if err := runInstall(rest[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(rest) < 2 {
 		usage()
 		os.Exit(2)
@@ -293,6 +307,10 @@ Targeting a capsule (in priority order):
 Adoption + identity:
   adopt --capsule <host:port> [--name <ctx>] [--yes]   claim a fresh capsule
   whoami                                               who am I on the current capsule
+  discover [--timeout 3s] [--json] [--installers|--unadopted]
+                                                       list capsules on the LAN via mDNS
+  install <short-id|--addr host:port> [--target /dev/X] [--name N] [--no-seal] [--yes]
+                                                       flash a fresh capsule from an installer-mode capsule
   key add --name <label> <pubkey.ed25519>              enroll another operator's pubkey
   key list                                             list enrolled keys
   key rm <kid>                                         remove an enrolled key

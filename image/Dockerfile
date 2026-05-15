@@ -39,7 +39,11 @@ RUN apk add --no-cache \
       # snapshots share a thin pool in the same VG. Without these the boot
       # path can't activate the VG and volume ops fail.
       lvm2 lvm2-dmeventd device-mapper \
-      thin-provisioning-tools
+      thin-provisioning-tools \
+      # blockdev: needed by the installer to ask the kernel to re-read
+      # the partition table after WriteMBR. Busybox's blockdev is
+      # missing some operations; util-linux-misc ships the full one.
+      util-linux-misc
 # Alpine ships CNI plugins at /usr/libexec/cni; CNI's default lookup is
 # /opt/cni/bin. Symlink so standard tooling (go-cni) finds them.
 RUN mkdir -p /opt/cni && ln -sf /usr/libexec/cni /opt/cni/bin

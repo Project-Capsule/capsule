@@ -96,6 +96,20 @@ func initPlatform(ctx context.Context) (Result, error) {
 		slog.Warn("failed to configure ethernet", "err", err)
 	}
 
+	// Installer mode detection. Decided BEFORE mounting /perm so the
+	// rest of capsuled can branch on it: installer mode mounts the
+	// USB's own (tiny, ephemeral) PERM partition but does not start
+	// containerd, the reconciler, etc.
+	if installer, targets := DetectInstallerMode(); installer {
+		res.InstallerMode = true
+		res.Targets = targets
+		paths := make([]string, 0, len(targets))
+		for _, t := range targets {
+			paths = append(paths, t.Path)
+		}
+		slog.Info("installer mode detected", "targets", paths)
+	}
+
 	if err := mountPerm(); err != nil {
 		slog.Error("failed to mount /perm", "err", err)
 	} else {

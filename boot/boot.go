@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 )
 
 // Result reports the outcome of running Init.
@@ -19,6 +20,26 @@ type Result struct {
 	// the bootloader's per-slot menuentry). Empty in dev mode (running off
 	// PID 1) or for old single-slot images.
 	ActiveSlot string
+	// InstallerMode is true when capsuled detected it booted from
+	// removable media AND at least one viable internal install target
+	// exists. In this mode capsuled exposes only InstallService and
+	// IdentityService; the reconciler, scheduler, containerd, and all
+	// workload paths stay dark. See boot.DetectInstallerMode.
+	InstallerMode bool
+	// Targets are the candidate internal disks where the installer can
+	// write a fresh Capsule install. Populated only when InstallerMode
+	// is true. Auto-pick rule: if len(Targets) == 1, take it; otherwise
+	// the operator must supply --target on `capsulectl install`.
+	Targets []TargetDisk
+}
+
+// TargetDisk is one candidate install destination — a non-removable
+// internal block device with no existing Capsule MBR signature.
+type TargetDisk struct {
+	// Path is the absolute /dev path ("/dev/nvme0n1", "/dev/sda").
+	Path string
+	// SizeBytes is the capacity from /sys/block/<name>/size * 512.
+	SizeBytes uint64
 }
 
 // Init performs PID 1 setup. On non-Linux it is a no-op (allows the daemon
@@ -36,8 +57,16 @@ func Init(ctx context.Context) (Result, error) {
 type BannerInfo struct {
 	GRPCPort       int
 	TLSFingerprint string // hex, lowercase, no separators (formatted for display here)
+	ShortID        string // stable handle ("capsule-a3f2"); empty pre-short_id
 	ClaimOpen      bool
 	EnrolledKeys   int
+	// Installer fields. When InstallerMode is true the banner switches
+	// to the installer template: prints INSTALLER + target disk and tells
+	// the operator to run `capsulectl install <short-id>`. The runtime
+	// adoption hint is suppressed.
+	InstallerMode bool
+	TargetDisk    string // "/dev/nvme0n1"; only used when InstallerMode is true
+	TargetSize    string // human-formatted ("512 GB"); only used when InstallerMode is true
 }
 
 // PrintBanner writes a CAPSULE ASCII banner + current IP + adoption
@@ -47,17 +76,35 @@ type BannerInfo struct {
 // (running off PID 1, on macOS, etc.).
 func PrintBanner(info BannerInfo) {
 	ip := defaultIPv4()
-	target := ip
 	if ip == "" {
 		ip = "(no IP — DHCP failed?)"
-		target = "<capsule-ip>"
+	}
+	// First line under the ASCII art: short ID (if set) + IP. Falling
+	// back to just IP keeps existing capsules legible after upgrade.
+	id := info.ShortID
+	if id == "" {
+		id = "(short_id pending — reboot to generate)"
 	}
 	var status string
-	if info.ClaimOpen {
-		status = fmt.Sprintf("  status: AWAITING ADOPTION\n  capsulectl adopt --capsule %s:%d\n", target, info.GRPCPort)
-	} else {
+	switch {
+	case info.InstallerMode:
+		// Installer banner: target disk + the exact command to run from
+		// the operator's laptop. Adoption hint suppressed — the install
+		// command seals the operator key in one pass.
+		tgt := info.TargetDisk
+		if tgt == "" {
+			tgt = "(no target disk detected)"
+		}
+		if info.TargetSize != "" {
+			tgt += "  (" + info.TargetSize + ")"
+		}
+		status = fmt.Sprintf("  status: INSTALLER  ready to flash internal disk\n  target: %s\n  capsulectl install %s --name <name>\n",
+			tgt, info.ShortID)
+	case info.ClaimOpen:
+		status = fmt.Sprintf("  status: AWAITING ADOPTION\n  capsulectl adopt --capsule %s:%d\n", ipForCmd(ip), info.GRPCPort)
+	default:
 		status = fmt.Sprintf("  status: adopted (%d enrolled key(s))\n  capsulectl --capsule %s:%d capsule info\n",
-			info.EnrolledKeys, target, info.GRPCPort)
+			info.EnrolledKeys, ipForCmd(ip), info.GRPCPort)
 	}
 	fp := formatFingerprintForBanner(info.TLSFingerprint)
 	banner := fmt.Sprintf(`
@@ -67,11 +114,11 @@ func PrintBanner(info BannerInfo) {
  | |___ / ___ \|  __/ ___) | |_| | |___| |___
   \____/_/   \_\_|   |____/ \___/|_____|_____|
 
-  ip: %s
+  %s  %s:%d
 %s  tls fingerprint (sha256):
 %s
 
-`, ip, status, fp)
+`, id, ip, info.GRPCPort, status, fp)
 	for _, p := range []string{"/dev/tty0", "/dev/console"} {
 		f, err := os.OpenFile(p, os.O_WRONLY, 0)
 		if err != nil {
@@ -80,6 +127,16 @@ func PrintBanner(info BannerInfo) {
 		_, _ = f.WriteString(banner)
 		_ = f.Close()
 	}
+}
+
+// ipForCmd returns the IP shown in command examples. Falls back to a
+// placeholder when DHCP hasn't produced an address — keeps the command
+// in the banner copy-pasteable rather than literally printing "(no IP)".
+func ipForCmd(ip string) string {
+	if strings.HasPrefix(ip, "(") {
+		return "<capsule-ip>"
+	}
+	return ip
 }
 
 // formatFingerprintForBanner groups a hex fingerprint into colon-

@@ -24,6 +24,10 @@ type CapsuleController struct {
 	// ActiveSlot is the currently active A/B slot identifier. Empty in
 	// dev mode or for old single-slot builds.
 	ActiveSlot string
+	// ShortID is the capsule's stable short handle ("capsule-a3f2").
+	// Surfaced in GetInfo so the CLI can correlate context entries with
+	// machines without parsing the UUID.
+	ShortID string
 	// LogPath is the file capsuled tees its slog output to. StreamLogs
 	// opens and tails this.
 	LogPath string
@@ -98,6 +102,7 @@ func (c *CapsuleController) GetInfo(ctx context.Context, _ *capsulev1.GetInfoReq
 
 	resp := &capsulev1.GetInfoResponse{
 		Hostname:             hostname,
+		ShortId:              c.ShortID,
 		KernelRelease:        u.release,
 		KernelVersion:        u.version,
 		Architecture:         u.machine,

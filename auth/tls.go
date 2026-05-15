@@ -82,6 +82,45 @@ func generate(certPath, keyPath, capsuleID string) (tls.Certificate, error) {
 	return cert, nil
 }
 
+// GenerateCertPEM mints a fresh self-signed Ed25519 cert and returns
+// it as PEM-encoded cert + key blobs along with the leaf fingerprint.
+// Used by the installer to pre-generate the disk-booted capsule's TLS
+// material so the operator's context entry can pin a known fingerprint
+// before the disk ever boots. Nothing is written to disk here.
+func GenerateCertPEM(capsuleID string) (certPEM, keyPEM []byte, fingerprint string, err error) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("auth: gen ed25519: %w", err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("auth: gen serial: %w", err)
+	}
+	tpl := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: capsuleID},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(100 * 365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		DNSNames:              []string{"capsule", "localhost", capsuleID},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, tpl, pub, priv)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("auth: x509 create: %w", err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("auth: marshal key: %w", err)
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	fingerprint = FingerprintRaw(der)
+	return certPEM, keyPEM, fingerprint, nil
+}
+
 // LeafFingerprint extracts the SHA-256 hex fingerprint of the first
 // certificate in a tls.Certificate. Caller-friendly wrapper around
 // FingerprintRaw.

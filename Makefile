@@ -62,6 +62,32 @@ qemu: $(DISK_IMAGE) $(EFI_VARS)
 	  -serial mon:stdio \
 	  -nographic
 
+# qemu-installer: boots the disk image as a *USB stick* (removable) and
+# attaches an empty 16 GiB scratch disk as the install target. This
+# triggers boot.DetectInstallerMode -> installer mode, so `capsulectl
+# install` can be driven end-to-end against a local VM.
+#
+# build/install-target.raw is created lazily; rm -f it to start fresh
+# between install attempts.
+INSTALL_TARGET := $(BUILD_DIR)/install-target.raw
+$(INSTALL_TARGET):
+	truncate -s 16G $(INSTALL_TARGET)
+
+qemu-installer: $(DISK_IMAGE) $(INSTALL_TARGET) $(EFI_VARS)
+	qemu-system-x86_64 \
+	  -m 2G -smp 2 \
+	  -drive if=pflash,format=raw,unit=0,readonly=on,file=$(OVMF_CODE) \
+	  -drive if=pflash,format=raw,unit=1,file=$(EFI_VARS) \
+	  -drive if=none,format=raw,id=usb-stick,file=$(DISK_IMAGE) \
+	  -device usb-ehci,id=ehci \
+	  -device usb-storage,bus=ehci.0,drive=usb-stick,removable=on,bootindex=1 \
+	  -drive if=virtio,format=raw,file=$(INSTALL_TARGET),bootindex=2 \
+	  -netdev user,id=n0,hostfwd=tcp::50000-:50000 \
+	  -device virtio-net-pci,netdev=n0 \
+	  -device virtio-rng-pci \
+	  -serial mon:stdio \
+	  -nographic
+
 $(DISK_IMAGE):
 	$(MAKE) image
 

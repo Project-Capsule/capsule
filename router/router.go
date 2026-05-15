@@ -47,6 +47,10 @@ type Config struct {
 	Volume   *controllers.VolumeController
 	Image    *controllers.ImageController
 	Identity *controllers.IdentityController
+	// Install is registered only when capsuled is in installer mode.
+	// On a runtime capsule it is nil and the service isn't exposed at
+	// all — clients that probe it receive Unimplemented.
+	Install *controllers.InstallController
 }
 
 // Serve starts the gRPC server and blocks until ctx is cancelled or the
@@ -108,6 +112,9 @@ func Serve(ctx context.Context, cfg Config) error {
 	}
 	if cfg.Image != nil {
 		capsulev1.RegisterImageServiceServer(srv, cfg.Image)
+	}
+	if cfg.Install != nil {
+		capsulev1.RegisterInstallServiceServer(srv, cfg.Install)
 	}
 
 	// Reflection leaks the entire wire schema; gate it behind a dev flag

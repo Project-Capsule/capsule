@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -20,6 +21,8 @@ import (
 	"github.com/geekgonecrazy/capsule/boot"
 	"github.com/geekgonecrazy/capsule/controllers"
 	coreimage "github.com/geekgonecrazy/capsule/core/image"
+	coreinstall "github.com/geekgonecrazy/capsule/core/install"
+	coremdns "github.com/geekgonecrazy/capsule/core/mdns"
 	"github.com/geekgonecrazy/capsule/core/reconciler"
 	coreupdate "github.com/geekgonecrazy/capsule/core/update"
 	corevolume "github.com/geekgonecrazy/capsule/core/volume"
@@ -122,7 +125,11 @@ func main() {
 		}
 	}
 
-	if isPID1 && bootResult.MountedPerm {
+	// Installer mode runs a degenerate capsule: identity + InstallService
+	// only. Skip containerd, the reconciler, scheduler, and every
+	// workload path — they have no business writing to the USB or
+	// touching the target disk before the install RPC fires.
+	if isPID1 && bootResult.MountedPerm && !bootResult.InstallerMode {
 		if err := os.MkdirAll("/run/containerd", 0o711); err != nil {
 			slog.Error("mkdir /run/containerd", "err", err)
 		}
@@ -152,6 +159,16 @@ func main() {
 	}
 	defer st.Close()
 
+	// First-boot ingest: if the previous boot was an installer that
+	// sealed an operator key, /perm/firstboot.json carries the disk's
+	// pre-generated identity. Consume it now (before ensureIdentity)
+	// so the rest of startup sees an already-adopted capsule.
+	if isPID1 && bootResult.MountedPerm && !bootResult.InstallerMode {
+		if err := coreinstall.IngestFirstBoot(ctx, st, "/perm"); err != nil {
+			slog.Error("firstboot ingest failed; falling back to claim-window path", "err", err)
+		}
+	}
+
 	// --- A/B update service: handles UpdateOS / UpdateConfirm + tentative-deadline auto-rollback ---
 	updateSvc := coreupdate.New(st.OSState(), bootResult.ActiveSlot)
 	if isPID1 && bootResult.ActiveSlot != "" {
@@ -167,6 +184,7 @@ func main() {
 		OSStateStore:   st.OSState(),
 		UpdateService:  updateSvc,
 	}
+	// ShortID is populated below once identity has been resolved.
 
 	// --- identity + TLS + auth ---
 	// Seed the singleton CapsuleIdentity row on first boot. UUIDv4 lives
@@ -175,6 +193,9 @@ func main() {
 	identity, err := ensureIdentity(ctx, st.Identity())
 	if err != nil {
 		slog.Error("ensure identity failed; capsule will refuse all RPCs", "err", err)
+	}
+	if identity != nil {
+		capsuleCtl.ShortID = identity.ShortID
 	}
 	tlsCertPath, tlsKeyPath := "/perm/tls/server.crt", "/perm/tls/server.key"
 	if !bootResult.MountedPerm {
@@ -216,6 +237,7 @@ func main() {
 			}
 			return pub, true
 		}, claim, stopAuth)
+	authn.InstallerMode = bootResult.InstallerMode
 
 	identityCtl := &controllers.IdentityController{
 		Identity:       st.Identity(),
@@ -224,9 +246,82 @@ func main() {
 		TLSFingerprint: tlsFingerprint,
 	}
 
+	// --- mDNS announcer ---
+	// Announce ourselves on the LAN so `capsulectl discover` finds the
+	// capsule without prior knowledge of the IP. Best-effort: an mDNS
+	// failure (multicast blocked, conflict, etc.) is logged but doesn't
+	// block startup. Only run when we have a real identity — dev mode
+	// without /perm has no stable short_id to announce.
+	var announcer *coremdns.Announcer
+	if isPID1 && identity != nil && identity.ShortID != "" {
+		port := 50000
+		if _, p, err := net.SplitHostPort(*addr); err == nil {
+			if n, err := strconv.Atoi(p); err == nil {
+				port = n
+			}
+		}
+		enrolled, _ := st.AuthorizedKeys().Count(ctx)
+		announcer = coremdns.New(port)
+		mode := "runtime"
+		var targetDisk string
+		var targetSize uint64
+		var targetPaths []string
+		if bootResult.InstallerMode {
+			mode = "installer"
+			if len(bootResult.Targets) > 0 {
+				targetDisk = bootResult.Targets[0].Path
+				targetSize = bootResult.Targets[0].SizeBytes
+				targetPaths = make([]string, 0, len(bootResult.Targets))
+				for _, t := range bootResult.Targets {
+					targetPaths = append(targetPaths, t.Path)
+				}
+			}
+		}
+		ann := coremdns.Announcement{
+			CapsuleID:       identity.CapsuleID,
+			ShortID:         identity.ShortID,
+			Adopted:         enrolled > 0,
+			Version:         version,
+			Mode:            mode,
+			TargetDisk:      targetDisk,
+			TargetSizeBytes: targetSize,
+			Targets:         targetPaths,
+		}
+		if err := announcer.Start(ctx, ann); err != nil {
+			slog.Warn("mDNS announce failed; discovery degrades to --addr only", "err", err)
+			announcer = nil
+		}
+	}
+	identityCtl.MDNS = announcer
+
+	// --- install controller (installer mode only) ---
+	// In installer mode, also resolve the USB boot disk so the install
+	// RPC knows where to copy partitions from. If we can't resolve it
+	// (no PARTUUID, weird hardware), the controller refuses Install
+	// with FailedPrecondition rather than booting in a half-installer
+	// state.
+	var installCtl *controllers.InstallController
+	if isPID1 && bootResult.InstallerMode {
+		usbDisk, err := boot.BootDisk()
+		if err != nil {
+			slog.Error("installer mode but cannot resolve USB boot disk", "err", err)
+		} else {
+			installCtl = &controllers.InstallController{
+				ShortID:     identity.ShortID,
+				CapsuleID:   identity.CapsuleID,
+				Version:     version,
+				USBBootDisk: usbDisk,
+				Targets:     bootResult.Targets,
+			}
+			slog.Info("install service registered",
+				"usb_disk", usbDisk,
+				"targets", len(bootResult.Targets))
+		}
+	}
+
 	// --- runtime driver (best-effort; workload APIs error out if nil) ---
 	var containerDriver runtime.ContainerDriver
-	if isPID1 {
+	if isPID1 && !bootResult.InstallerMode {
 		// Wait briefly for containerd to come up — it needs /run/containerd
 		// and the supervisor to fork it. Best-effort with a short retry.
 		containerDriver = dialContainerd(ctx, "/run/containerd/containerd.sock", 30*time.Second)
@@ -234,7 +329,7 @@ func main() {
 
 	// --- runtime drivers ---
 	var vmDriver runtime.VMDriver
-	if isPID1 {
+	if isPID1 && !bootResult.InstallerMode {
 		vmDriver = firecrackerRT.New()
 	}
 
@@ -283,12 +378,23 @@ func main() {
 				}
 			}
 			n, _ := st.AuthorizedKeys().Count(ctx)
-			boot.PrintBanner(boot.BannerInfo{
+			shortID := ""
+			if identity != nil {
+				shortID = identity.ShortID
+			}
+			binfo := boot.BannerInfo{
 				GRPCPort:       port,
 				TLSFingerprint: tlsFingerprint,
+				ShortID:        shortID,
 				ClaimOpen:      claim.Open(),
 				EnrolledKeys:   n,
-			})
+				InstallerMode:  bootResult.InstallerMode,
+			}
+			if bootResult.InstallerMode && len(bootResult.Targets) > 0 {
+				binfo.TargetDisk = bootResult.Targets[0].Path
+				binfo.TargetSize = humanInstallerBytes(bootResult.Targets[0].SizeBytes)
+			}
+			boot.PrintBanner(binfo)
 		}()
 	}
 
@@ -302,6 +408,7 @@ func main() {
 		Volume:           volumeCtl,
 		Image:            imageCtl,
 		Identity:         identityCtl,
+		Install:          installCtl,
 	}); err != nil {
 		slog.Error("gRPC server failed", "err", err)
 		if isPID1 {
@@ -324,10 +431,21 @@ func main() {
 
 // ensureIdentity returns the singleton CapsuleIdentity row, generating
 // it on first boot. Called before the gRPC server starts so the JWT
-// audience is stable from the very first RPC.
+// audience is stable from the very first RPC. Also backfills ShortID
+// for capsules upgraded from versions that didn't persist one.
 func ensureIdentity(ctx context.Context, ids store.IdentityStore) (*store.CapsuleIdentity, error) {
 	id, err := ids.Get(ctx)
 	if err == nil {
+		// Existing capsule. Backfill ShortID if it was added by a later
+		// schema migration — derive it from the stable CapsuleID so the
+		// value never changes across reboots / OS updates.
+		if id.ShortID == "" {
+			id.ShortID = deriveShortID(id.CapsuleID)
+			if err := ids.Put(ctx, id); err != nil {
+				return nil, err
+			}
+			slog.Info("backfilled short_id", "short_id", id.ShortID)
+		}
 		return id, nil
 	}
 	if !errors.Is(err, store.ErrNotFound) {
@@ -337,11 +455,41 @@ func ensureIdentity(ctx context.Context, ids store.IdentityStore) (*store.Capsul
 		CapsuleID:     uuid.NewString(),
 		CreatedAtUnix: time.Now().Unix(),
 	}
+	fresh.ShortID = deriveShortID(fresh.CapsuleID)
 	if err := ids.Put(ctx, fresh); err != nil {
 		return nil, err
 	}
-	slog.Info("generated capsule_id on first boot", "capsule_id", fresh.CapsuleID)
+	slog.Info("generated capsule_id on first boot", "capsule_id", fresh.CapsuleID, "short_id", fresh.ShortID)
 	return fresh, nil
+}
+
+// humanInstallerBytes renders a disk size for the installer banner.
+// Uses decimal units ("512 GB", "1.0 TB") because that's what disk
+// labels show; binary units would look unfamiliar to homelab operators
+// staring at the HDMI banner.
+func humanInstallerBytes(n uint64) string {
+	const unit = 1000
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// deriveShortID derives a human-memorable handle ("capsule-a3f2") from
+// the first 2 bytes of the parsed CapsuleID UUID. 16 bits is plenty of
+// uniqueness at homelab scale (~1/65536 collision per pair) and short
+// enough to type from an HDMI screen without errors.
+func deriveShortID(capsuleID string) string {
+	u, err := uuid.Parse(capsuleID)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("capsule-%02x%02x", u[0], u[1])
 }
 
 // wipeAuthOnDisk handles the RESET_AUTH recovery path before the main

@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/geekgonecrazy/capsule/auth"
+	"github.com/geekgonecrazy/capsule/core/mdns"
 	capsulev1 "github.com/geekgonecrazy/capsule/models/capsule/v1"
 	"github.com/geekgonecrazy/capsule/store"
 )
@@ -35,6 +36,11 @@ type IdentityController struct {
 	// cert. Echoed back in AdoptResponse so the client can cross-check
 	// against the cert it saw on the wire.
 	TLSFingerprint string
+	// MDNS is the announcer that publishes this capsule on the LAN.
+	// Adopt flips its `adopted` TXT to true after the first enrollment
+	// so `capsulectl discover` sees the change without polling. Optional
+	// — nil in dev mode or on hosts where the announcer failed to bind.
+	MDNS *mdns.Announcer
 }
 
 // Adopt enrolls the caller's pubkey as the first authorized key.
@@ -81,6 +87,14 @@ func (c *IdentityController) Adopt(ctx context.Context, req *capsulev1.AdoptRequ
 	}
 	c.Claim.Close()
 	slog.Info("capsule adopted", "kid", kid, "name", name, "capsule_id", id.CapsuleID)
+	// Best-effort: flip the mDNS adopted flag so `discover` reflects
+	// the change immediately. Failure here is non-fatal; the capsule is
+	// adopted regardless.
+	if c.MDNS != nil {
+		if err := c.MDNS.MarkAdopted(ctx); err != nil {
+			slog.Warn("mdns mark adopted failed", "err", err)
+		}
+	}
 	return &capsulev1.AdoptResponse{
 		CapsuleId:            id.CapsuleID,
 		Kid:                  kid,

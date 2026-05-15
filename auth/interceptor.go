@@ -13,10 +13,20 @@ import (
 )
 
 // AdoptMethod is the only fully-qualified gRPC method that may be
-// called without a valid bearer token. Even Adopt is gated by the
-// ClaimWindow — no key, no token, no authentication of any kind is
-// possible against any other method.
+// called without a valid bearer token on a runtime capsule. Even
+// Adopt is gated by the ClaimWindow — no key, no token, no
+// authentication of any kind is possible against any other method.
 const AdoptMethod = "/capsule.v1.IdentityService/Adopt"
+
+// InstallerMethods are exposed by capsuled when it boots in installer
+// mode (USB on a machine with a viable internal target). Pre-adoption,
+// physical access to the USB is the trust boundary — the same posture
+// as the claim window. The operator validates the installer's TLS
+// fingerprint via the HDMI banner before sealing a key.
+var InstallerMethods = map[string]struct{}{
+	"/capsule.v1.InstallService/Status":  {},
+	"/capsule.v1.InstallService/Install": {},
+}
 
 // KeyLookup resolves an enrolled kid to its raw Ed25519 public key, or
 // returns false if no such key is enrolled. The interceptor calls this
@@ -36,6 +46,11 @@ type Authenticator struct {
 	// Claim is the boot-time adoption gate. Open() == true is the only
 	// state in which AdoptMethod is callable.
 	Claim *ClaimWindow
+	// InstallerMode, when true, lets the methods in InstallerMethods
+	// through without authentication. Runtime capsules MUST leave this
+	// false — otherwise an adopted box would accept unauthenticated
+	// Install RPCs that re-flash its own disk.
+	InstallerMode bool
 
 	jti *jtiCache
 }
@@ -69,6 +84,11 @@ func (a *Authenticator) authorize(ctx context.Context, fullMethod string) (conte
 				"adoption window closed; use an enrolled key, or trigger RESET_AUTH at the console")
 		}
 		return ctx, nil
+	}
+	if a.InstallerMode {
+		if _, ok := InstallerMethods[fullMethod]; ok {
+			return ctx, nil
+		}
 	}
 	md, _ := metadata.FromIncomingContext(ctx)
 	tok := bearer(md.Get("authorization"))

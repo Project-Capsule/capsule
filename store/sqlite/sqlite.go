@@ -92,6 +92,7 @@ func migrate(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS capsule_identity (
 			singleton          INTEGER PRIMARY KEY CHECK (singleton = 1),
 			capsule_id         TEXT NOT NULL,
+			short_id           TEXT,
 			created_at_unix    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
 			adopted_at_unix    INTEGER,
 			adopted_by_kid     TEXT
@@ -110,6 +111,27 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(s); err != nil {
 			return fmt.Errorf("sqlite migrate: %w", err)
 		}
+	}
+	// Additive column migrations for existing databases. CREATE TABLE IF
+	// NOT EXISTS is a no-op once the table exists, so columns added after
+	// the initial schema need a separate ALTER TABLE step. Errors that
+	// look like "duplicate column" are swallowed so re-runs are safe.
+	if err := addColumnIfMissing(db, "capsule_identity", "short_id", "TEXT"); err != nil {
+		return fmt.Errorf("sqlite migrate short_id: %w", err)
+	}
+	return nil
+}
+
+// addColumnIfMissing runs ALTER TABLE ADD COLUMN, treating "duplicate
+// column" as success. Both modernc.org/sqlite and the SQLite shell return
+// the same message, so a substring match is portable here.
+func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
+	stmt := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s;`, table, column, decl)
+	if _, err := db.Exec(stmt); err != nil {
+		if strings.Contains(err.Error(), "duplicate column") {
+			return nil
+		}
+		return err
 	}
 	return nil
 }
@@ -284,18 +306,22 @@ type identityStore struct{ db *sql.DB }
 
 func (s *identityStore) Get(ctx context.Context) (*store.CapsuleIdentity, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT capsule_id, created_at_unix, adopted_at_unix, adopted_by_kid
+SELECT capsule_id, short_id, created_at_unix, adopted_at_unix, adopted_by_kid
 FROM capsule_identity WHERE singleton = 1;`)
 	var (
 		id        store.CapsuleIdentity
+		shortID   sql.NullString
 		adoptedAt sql.NullInt64
 		adoptedBy sql.NullString
 	)
-	if err := row.Scan(&id.CapsuleID, &id.CreatedAtUnix, &adoptedAt, &adoptedBy); err != nil {
+	if err := row.Scan(&id.CapsuleID, &shortID, &id.CreatedAtUnix, &adoptedAt, &adoptedBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, store.ErrNotFound
 		}
 		return nil, err
+	}
+	if shortID.Valid {
+		id.ShortID = shortID.String
 	}
 	if adoptedAt.Valid {
 		id.AdoptedAtUnix = adoptedAt.Int64
@@ -307,7 +333,10 @@ FROM capsule_identity WHERE singleton = 1;`)
 }
 
 func (s *identityStore) Put(ctx context.Context, id *store.CapsuleIdentity) error {
-	var adoptedAt, adoptedBy any
+	var shortID, adoptedAt, adoptedBy any
+	if id.ShortID != "" {
+		shortID = id.ShortID
+	}
 	if id.AdoptedAtUnix != 0 {
 		adoptedAt = id.AdoptedAtUnix
 	}
@@ -319,14 +348,15 @@ func (s *identityStore) Put(ctx context.Context, id *store.CapsuleIdentity) erro
 		createdAt = time.Now().Unix()
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO capsule_identity(singleton, capsule_id, created_at_unix, adopted_at_unix, adopted_by_kid)
-VALUES(1, ?, ?, ?, ?)
+INSERT INTO capsule_identity(singleton, capsule_id, short_id, created_at_unix, adopted_at_unix, adopted_by_kid)
+VALUES(1, ?, ?, ?, ?, ?)
 ON CONFLICT(singleton) DO UPDATE SET
     capsule_id      = excluded.capsule_id,
+    short_id        = excluded.short_id,
     created_at_unix = excluded.created_at_unix,
     adopted_at_unix = excluded.adopted_at_unix,
     adopted_by_kid  = excluded.adopted_by_kid;
-`, id.CapsuleID, createdAt, adoptedAt, adoptedBy)
+`, id.CapsuleID, shortID, createdAt, adoptedAt, adoptedBy)
 	return err
 }
 

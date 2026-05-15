@@ -33,6 +33,11 @@ message GetInfoRequest {}
 message GetInfoResponse {
   // Hostname as reported by the kernel.
   string hostname = 1;
+  // Stable short handle derived from capsule_id ("capsule-a3f2").
+  // Shown on the HDMI banner and in `capsulectl discover` output so
+  // operators can correlate a physical machine with a CLI entry without
+  // typing a UUID. Empty on pre-short_id capsules until they reboot.
+  string short_id = 22;
   // Kernel release string (uname -r).
   string kernel_release = 2;
   // Kernel version string (uname -v).
