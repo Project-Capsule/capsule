@@ -147,6 +147,13 @@ func loadBridgeModules() {
 		"r8169", "r8125",                // Realtek
 		"bridge", "br_netfilter", "veth", "nf_nat",
 		"kvm", "kvm_intel", "kvm_amd",
+		// device-mapper for LVM. Without dm_mod, /dev/mapper/control
+		// doesn't exist and vgchange fails with "Failure to communicate
+		// with kernel device-mapper driver", which means /perm can't be
+		// mounted and capsuled drops to the state-broken safety path.
+		// dm-thin-pool is the thinpool target backing user volumes +
+		// the future containerd devmapper snapshotter.
+		"dm_mod", "dm-thin-pool",
 		"tun",
 	} {
 		cmd := exec.Command("/sbin/modprobe", m)

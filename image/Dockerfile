@@ -16,6 +16,14 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 
 # Stage 2: assemble the Capsule rootfs. Alpine provides userland; capsuled is /sbin/init.
 FROM alpine:3.23 AS rootfs
+# linux-lts must be pinned to EXACTLY the same version Dockerfile.packer
+# uses to build /boot/vmlinuz — the rootfs ships /lib/modules/<kver>/ and
+# the running kernel reads it as /lib/modules/$(uname -r)/. Any drift
+# between the two means modprobe silently fails for every module
+# (dm_mod, NIC drivers, KVM, …), which manifests at boot as "/perm
+# mount failed: /dev/mapper/control: No such device" and a dead NIC.
+# Keep this in lockstep with Dockerfile.packer's LINUX_LTS_VERSION.
+ARG LINUX_LTS_VERSION=6.18.24-r0
 RUN apk add --no-cache \
       iproute2 \
       iptables \
@@ -26,7 +34,7 @@ RUN apk add --no-cache \
       # (not linux-virt) so the same kernel works on real hardware (Beelink
       # NVMe / NICs / USB) and under QEMU. Required: containerd's overlayfs
       # snapshotter, bridge networking, KVM all need modules from here.
-      linux-lts \
+      "linux-lts=${LINUX_LTS_VERSION}" \
       # CNI plugins for bridge networking + portmap + firewall.
       cni-plugins \
       # mkfs.ext4 + resize2fs run at build time (vm-shared.ext4) and at
