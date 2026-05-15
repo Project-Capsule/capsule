@@ -143,17 +143,31 @@ func main() {
 	}
 
 	// --- store ---
+	// storeBroken signals that /perm was mounted but SQLite couldn't be
+	// opened — we silently fell back to the in-memory store. This is the
+	// footgun mode: an already-adopted box would otherwise present an
+	// empty `authorized_keys` and open a fresh claim window, looking to
+	// the operator (and to any attacker on the LAN) like a brand-new
+	// capsule. Surface it on the banner, refuse to open the claim
+	// window, and keep the gRPC server bound to memory state so debugging
+	// is still possible (capsule logs, capsule info).
 	var st store.Store
+	var storeBroken bool
+	var storeErr error
 	if bootResult.MountedPerm {
 		ss, err := sqlite.Open("/perm/capsule/state.db")
 		if err != nil {
-			slog.Error("sqlite open failed, falling back to memory store", "err", err)
+			slog.Error("sqlite open failed on /perm-backed install — refusing to open claim window", "err", err)
+			storeBroken = true
+			storeErr = err
 			st = memory.New()
 		} else {
 			st = ss
 		}
 	} else {
-		// Dev / non-PID-1 run: no /perm → use in-memory store.
+		// Dev / non-PID-1 run: no /perm → use in-memory store. This
+		// path is fine because the operator is intentionally running
+		// without persistent state.
 		slog.Info("no /perm mount; using in-memory store")
 		st = memory.New()
 	}
@@ -214,11 +228,24 @@ func main() {
 	tlsFingerprint, _ := auth.LeafFingerprint(tlsCert)
 
 	enrolledCount, _ := st.AuthorizedKeys().Count(ctx)
-	claim := auth.NewClaimWindow(enrolledCount, claimWindowDuration)
-	if claim.Open() {
+	// If /perm is mounted but SQLite couldn't be opened, the
+	// authorized_keys count is meaningless (we're on an in-memory
+	// store). Pretend the count is positive so NewClaimWindow stays
+	// closed — refusing adoption is safer than offering it to whoever
+	// shows up on the LAN.
+	claimSeed := enrolledCount
+	if storeBroken {
+		claimSeed = 1
+	}
+	claim := auth.NewClaimWindow(claimSeed, claimWindowDuration)
+	switch {
+	case storeBroken:
+		slog.Error("capsule state UNREADABLE — claim window NOT opened; restore /perm or use RESET_AUTH",
+			"capsule_id", identity.CapsuleID, "tls_fingerprint", tlsFingerprint, "err", storeErr)
+	case claim.Open():
 		slog.Warn("claim window OPEN — first capsulectl adopt within "+claimWindowDuration.String()+" wins",
 			"capsule_id", identity.CapsuleID, "tls_fingerprint", tlsFingerprint)
-	} else {
+	default:
 		slog.Info("capsule adopted",
 			"capsule_id", identity.CapsuleID, "enrolled_keys", enrolledCount, "tls_fingerprint", tlsFingerprint)
 	}
@@ -389,6 +416,10 @@ func main() {
 				ClaimOpen:      claim.Open(),
 				EnrolledKeys:   n,
 				InstallerMode:  bootResult.InstallerMode,
+				StoreBroken:    storeBroken,
+			}
+			if storeBroken && storeErr != nil {
+				binfo.StoreError = storeErr.Error()
 			}
 			if bootResult.InstallerMode && len(bootResult.Targets) > 0 {
 				binfo.TargetDisk = bootResult.Targets[0].Path

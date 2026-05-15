@@ -67,6 +67,13 @@ type BannerInfo struct {
 	InstallerMode bool
 	TargetDisk    string // "/dev/nvme0n1"; only used when InstallerMode is true
 	TargetSize    string // human-formatted ("512 GB"); only used when InstallerMode is true
+	// StoreBroken signals that /perm was mounted but SQLite refused to
+	// open — capsuled fell back to an in-memory store and the claim
+	// window was NOT opened. The banner switches to a recovery template
+	// so the operator immediately knows this is not a normal "awaiting
+	// adoption" state.
+	StoreBroken bool
+	StoreError  string
 }
 
 // PrintBanner writes a CAPSULE ASCII banner + current IP + adoption
@@ -87,6 +94,15 @@ func PrintBanner(info BannerInfo) {
 	}
 	var status string
 	switch {
+	case info.StoreBroken:
+		// Recovery banner: /perm is mounted but SQLite refused to open.
+		// Adoption is intentionally NOT offered — the operator must
+		// restore state.db or run RESET_AUTH at the console first.
+		errMsg := info.StoreError
+		if errMsg == "" {
+			errMsg = "(see capsuled logs)"
+		}
+		status = fmt.Sprintf("  status: STATE UNREADABLE — refusing adoption\n  error:  %s\n  recover: restore /perm/capsule/state.db, or touch /perm/capsule/RESET_AUTH and reboot\n", errMsg)
 	case info.InstallerMode:
 		// Installer banner: target disk + the exact command to run from
 		// the operator's laptop. Adoption hint suppressed — the install

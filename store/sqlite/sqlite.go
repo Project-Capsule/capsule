@@ -122,16 +122,41 @@ func migrate(db *sql.DB) error {
 	return nil
 }
 
-// addColumnIfMissing runs ALTER TABLE ADD COLUMN, treating "duplicate
-// column" as success. Both modernc.org/sqlite and the SQLite shell return
-// the same message, so a substring match is portable here.
+// addColumnIfMissing runs ALTER TABLE ADD COLUMN, no-op if the column
+// is already present. Uses PRAGMA table_info to check schema rather
+// than catching the ALTER error — string-matching SQLite error
+// messages varies across driver versions and is brittle. The check is
+// authoritative: zero rows from table_info means no such table, in
+// which case ALTER will fail loudly (the correct behavior).
 func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
-	stmt := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s;`, table, column, decl)
-	if _, err := db.Exec(stmt); err != nil {
-		if strings.Contains(err.Error(), "duplicate column") {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s);`, table))
+	if err != nil {
+		return fmt.Errorf("table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			typ     string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("scan table_info: %w", err)
+		}
+		if name == column {
 			return nil
 		}
+	}
+	if err := rows.Err(); err != nil {
 		return err
+	}
+	rows.Close()
+	stmt := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s;`, table, column, decl)
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("alter table %s add column %s: %w", table, column, err)
 	}
 	return nil
 }
