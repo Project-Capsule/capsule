@@ -37,6 +37,7 @@ Designs we've committed to *on paper* but not yet started building. Each is its 
 - **[docs/pci-devices.md](docs/pci-devices.md)** — Operator-registered device passthrough for containers (GPUs, FPGAs, USB-serial). v1 is containers-only; microVM passthrough waits on a non-Firecracker backend (see Next #7).
 - **[docs/fabric.md](docs/fabric.md)** — A WireGuard mesh between capsules with declarative per-workload allow-list policy. Stable cross-host workload IPs in `100.64.0.0/10`. Default-deny. Operator-driven enrollment, no central control plane.
 - **[docs/edge.md](docs/edge.md)** — Exposing fabric workloads to the public internet via a capsule-managed Caddy. Direct DNS or behind a cloud LB / CDN. Builds on the fabric proposal.
+- **[docs/live-migration.md](docs/live-migration.md)** — Operator-orchestrated migration between capsules for containers and microVMs: CRIU paths, optional backend snapshots, and LVM-thin volume transfer/cutover.
 
 ## Next (in rough priority order)
 
