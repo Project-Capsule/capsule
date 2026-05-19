@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,6 +67,16 @@ const BridgeLabel = "capsule.network/mode"
 // EnsureRunning can detect spec drift (operator re-applied with a new
 // image / env / etc.) and recreate.
 const SpecHashLabel = "capsule.spec/hash"
+
+// PortMapLabel persists the bridge port mappings on the container so
+// Remove can replay the EXACT same WithCapabilityPortMap args to CNI
+// on teardown that cniSetup passed on setup. CNI requires DEL to be
+// invoked with the same capability config as ADD; without this the
+// portmap plugin's DEL leaves its DNAT chain behind and every
+// recreate/delete strands a stale rule that shadows the live
+// container. Format: "hostPort:containerPort/proto" comma-separated,
+// e.g. "2222:22/tcp,9000:9000/udp". Empty/absent => no mappings.
+const PortMapLabel = "capsule.network/portmap"
 
 // New dials containerd at socket and returns a Driver. Caller must Close
 // when done.
@@ -188,6 +199,17 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 	case capsulev1.NetworkMode_NETWORK_MODE_BRIDGE:
 		// Bridge mode uses the default new-netns behavior; CNI configures
 		// the netns after the task is created but before it starts.
+		//
+		// Share the host's /etc/resolv.conf + /etc/hosts. Without this a
+		// bridge container has working egress (CNI ipMasq) but NO
+		// resolver — every DNS lookup fails. capsuled keeps the host
+		// /etc/resolv.conf populated (boot.installResolvConf) and the
+		// container's traffic is masqueraded, so the host's nameserver
+		// is reachable from inside the netns.
+		specOpts = append(specOpts,
+			oci.WithHostHostsFile,
+			oci.WithHostResolvconf,
+		)
 	default:
 		// Leave containerd's default: private netns with only loopback.
 	}
@@ -225,6 +247,7 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 		containerd.WithContainerLabels(map[string]string{
 			BridgeLabel:   networkModeLabel(spec.GetNetworkMode()),
 			SpecHashLabel: desiredHash,
+			PortMapLabel:  encodePortMappings(spec.GetPorts()),
 		}),
 	}
 	_ = containerOpts // used below in the NewContainer call
@@ -260,7 +283,7 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 		// bridge assigned an IP but loopback failed), the next attempt
 		// gets "duplicate allocation is not allowed". Teardown is safe
 		// when nothing is there.
-		_ = d.cniTeardown(ctx, name, task.Pid())
+		_ = d.cniTeardown(ctx, name, task.Pid(), gocniPortMappings(spec.GetPorts()))
 		if err := d.cniSetup(ctx, name, task.Pid(), spec.GetPorts()); err != nil {
 			_, _ = task.Delete(ctx, containerd.WithProcessKill)
 			_ = container.Delete(ctx, containerd.WithSnapshotCleanup)
@@ -271,7 +294,7 @@ func (d *Driver) EnsureRunning(parentCtx context.Context, w *capsulev1.Workload)
 	if err := task.Start(ctx); err != nil {
 		// Teardown bridge networking too, if we set it up.
 		if spec.GetNetworkMode() == capsulev1.NetworkMode_NETWORK_MODE_BRIDGE {
-			_ = d.cniTeardown(ctx, name, task.Pid())
+			_ = d.cniTeardown(ctx, name, task.Pid(), gocniPortMappings(spec.GetPorts()))
 		}
 		_, _ = task.Delete(ctx, containerd.WithProcessKill)
 		_ = container.Delete(ctx, containerd.WithSnapshotCleanup)
@@ -317,41 +340,107 @@ func (d *Driver) ensureCNI() (gocni.CNI, error) {
 	return d.cni, d.cniErr
 }
 
+// gocniPortMappings converts the proto port list to go-cni's type,
+// defaulting an empty protocol to tcp. Shared by setup and teardown so
+// the two can never drift.
+func gocniPortMappings(ports []*capsulev1.PortMapping) []gocni.PortMapping {
+	if len(ports) == 0 {
+		return nil
+	}
+	out := make([]gocni.PortMapping, 0, len(ports))
+	for _, p := range ports {
+		proto := strings.ToLower(p.GetProtocol())
+		if proto == "" {
+			proto = "tcp"
+		}
+		out = append(out, gocni.PortMapping{
+			HostPort:      int32(p.GetHostPort()),
+			ContainerPort: int32(p.GetContainerPort()),
+			Protocol:      proto,
+		})
+	}
+	return out
+}
+
+// portMapNSOpts wraps mappings in the CNI capability opt, or returns
+// nil opts when there are none. ADD and DEL MUST be called with the
+// identical opts — that symmetry is the whole point of this helper.
+func portMapNSOpts(m []gocni.PortMapping) []gocni.NamespaceOpts {
+	if len(m) == 0 {
+		return nil
+	}
+	return []gocni.NamespaceOpts{gocni.WithCapabilityPortMap(m)}
+}
+
+// encodePortMappings serialises the proto port list for the
+// PortMapLabel: "hostPort:containerPort/proto" comma-separated.
+func encodePortMappings(ports []*capsulev1.PortMapping) string {
+	m := gocniPortMappings(ports)
+	if len(m) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(m))
+	for _, p := range m {
+		parts = append(parts, fmt.Sprintf("%d:%d/%s", p.HostPort, p.ContainerPort, p.Protocol))
+	}
+	return strings.Join(parts, ",")
+}
+
+// decodePortMappings parses the PortMapLabel back into go-cni mappings
+// so Remove can replay the exact ADD-time capability args without the
+// live spec (which it doesn't have). Malformed entries are skipped —
+// teardown is best-effort and must not panic on a bad label.
+func decodePortMappings(s string) []gocni.PortMapping {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []gocni.PortMapping
+	for _, e := range strings.Split(s, ",") {
+		hostCtr, proto, ok := strings.Cut(e, "/")
+		if !ok {
+			continue
+		}
+		hp, cp, ok := strings.Cut(hostCtr, ":")
+		if !ok {
+			continue
+		}
+		h, err1 := strconv.Atoi(hp)
+		c, err2 := strconv.Atoi(cp)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		out = append(out, gocni.PortMapping{
+			HostPort:      int32(h),
+			ContainerPort: int32(c),
+			Protocol:      proto,
+		})
+	}
+	return out
+}
+
 func (d *Driver) cniSetup(ctx context.Context, name string, pid uint32, ports []*capsulev1.PortMapping) error {
 	cn, err := d.ensureCNI()
 	if err != nil {
 		return err
 	}
 	netnsPath := fmt.Sprintf("/proc/%d/ns/net", pid)
-
-	opts := []gocni.NamespaceOpts{}
-	if len(ports) > 0 {
-		mappings := make([]gocni.PortMapping, 0, len(ports))
-		for _, p := range ports {
-			proto := strings.ToLower(p.GetProtocol())
-			if proto == "" {
-				proto = "tcp"
-			}
-			mappings = append(mappings, gocni.PortMapping{
-				HostPort:      int32(p.GetHostPort()),
-				ContainerPort: int32(p.GetContainerPort()),
-				Protocol:      proto,
-			})
-		}
-		opts = append(opts, gocni.WithCapabilityPortMap(mappings))
-	}
-
-	_, err = cn.Setup(ctx, name, netnsPath, opts...)
+	_, err = cn.Setup(ctx, name, netnsPath, portMapNSOpts(gocniPortMappings(ports))...)
 	return err
 }
 
-func (d *Driver) cniTeardown(ctx context.Context, name string, pid uint32) error {
+// cniTeardown removes the CNI attachment. pm MUST be the same port
+// mappings cniSetup was given — CNI's DEL has to see the identical
+// capability args as ADD or the portmap plugin won't remove its DNAT
+// chain (the orphaned-rule bug). Callers reconstruct pm from the
+// PortMapLabel (Remove) or pass the live spec's ports (create path).
+func (d *Driver) cniTeardown(ctx context.Context, name string, pid uint32, pm []gocni.PortMapping) error {
 	cn, err := d.ensureCNI()
 	if err != nil {
 		return err
 	}
 	netnsPath := fmt.Sprintf("/proc/%d/ns/net", pid)
-	return cn.Remove(ctx, name, netnsPath)
+	return cn.Remove(ctx, name, netnsPath, portMapNSOpts(pm)...)
 }
 
 // Remove — idempotently stop and delete.
@@ -370,10 +459,17 @@ func (d *Driver) Remove(parentCtx context.Context, name string) error {
 	// path (derived from the task's PID).
 	info, infoErr := c.Info(ctx)
 	needsCNI := infoErr == nil && info.Labels[BridgeLabel] == "bridge"
+	// Replay the exact port mappings cniSetup used (persisted as a
+	// label) so the portmap plugin's DEL actually removes its DNAT
+	// chain instead of orphaning it.
+	var teardownPM []gocni.PortMapping
+	if infoErr == nil {
+		teardownPM = decodePortMappings(info.Labels[PortMapLabel])
+	}
 
 	if task, err := c.Task(ctx, nil); err == nil {
 		if needsCNI {
-			if terr := d.cniTeardown(ctx, name, task.Pid()); terr != nil {
+			if terr := d.cniTeardown(ctx, name, task.Pid(), teardownPM); terr != nil {
 				slog.Warn("cni teardown", "workload", name, "err", terr)
 			}
 		}
