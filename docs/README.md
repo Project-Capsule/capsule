@@ -28,6 +28,7 @@ This folder is the operator's manual.
 - **[edge.md](edge.md)** — Exposing fabric workloads to the public internet: an edge capsule with a public IP runs a managed Caddy, terminates TLS, routes into the fabric. Direct DNS or behind a cloud LB / CDN. ACME auto + DNS-01 + manual cert modes. Status: proposal. Builds on the fabric proposal. 
 - **[live-migration.md](live-migration.md)** — Live migration between capsules for containers and microVMs: host CRIU for containers, guest-CRIU baseline for microVM payloads, backend snapshot fast path, and LVM-thin snapshot/delta volume transfer. Status: proposal.
 - **[web-ui.md](web-ui.md)** — A browser console for a fleet of capsules: a standalone `capsule-console` (never part of `capsuled`) carrying a grpc-gateway JSON transcoder, multi-capsule fan-out, its own user identity/RBAC + audit, and custody of per-capsule operator keys. Includes wireframes. Status: proposal.
+- **[sealed.md](sealed.md)** — Sealed capsules: a build mode for a fixed-payload appliance you can ship (a projector computer, drone compute). The payload (workload manifests + their OCI images) is baked into the immutable A/B squashfs so it rolls back with the slot; updates are signed against a build-time key and self-confirm on payload health when no operator is in the field; pre-registered / adoptable / locked enrollment modes. Reuses install.md's first-boot seed path; extends updates.md. Status: proposal.
 
 ## Vocabulary
 
