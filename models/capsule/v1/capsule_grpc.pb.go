@@ -23,6 +23,7 @@ const (
 	CapsuleService_StreamLogs_FullMethodName    = "/capsule.v1.CapsuleService/StreamLogs"
 	CapsuleService_UpdateOS_FullMethodName      = "/capsule.v1.CapsuleService/UpdateOS"
 	CapsuleService_UpdateConfirm_FullMethodName = "/capsule.v1.CapsuleService/UpdateConfirm"
+	CapsuleService_RebootNode_FullMethodName    = "/capsule.v1.CapsuleService/RebootNode"
 )
 
 // CapsuleServiceClient is the client API for CapsuleService service.
@@ -51,6 +52,13 @@ type CapsuleServiceClient interface {
 	// they've verified the new slot is healthy. Persists the GRUB default
 	// selection and clears pending state.
 	UpdateConfirm(ctx context.Context, in *UpdateConfirmRequest, opts ...grpc.CallOption) (*UpdateConfirmResponse, error)
+	// RebootNode reboots the capsule immediately, no operator confirmation
+	// and no slot change — it comes back up on the same slot. The response
+	// is sent first, then the reboot is scheduled after a short delay so
+	// the client gets a clean reply before the kernel restarts. Operator
+	// escape hatch for wedged-node recovery (e.g. tmpfs exhaustion); not
+	// part of the A/B update flow.
+	RebootNode(ctx context.Context, in *RebootNodeRequest, opts ...grpc.CallOption) (*RebootNodeResponse, error)
 }
 
 type capsuleServiceClient struct {
@@ -113,6 +121,16 @@ func (c *capsuleServiceClient) UpdateConfirm(ctx context.Context, in *UpdateConf
 	return out, nil
 }
 
+func (c *capsuleServiceClient) RebootNode(ctx context.Context, in *RebootNodeRequest, opts ...grpc.CallOption) (*RebootNodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RebootNodeResponse)
+	err := c.cc.Invoke(ctx, CapsuleService_RebootNode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CapsuleServiceServer is the server API for CapsuleService service.
 // All implementations must embed UnimplementedCapsuleServiceServer
 // for forward compatibility.
@@ -139,6 +157,13 @@ type CapsuleServiceServer interface {
 	// they've verified the new slot is healthy. Persists the GRUB default
 	// selection and clears pending state.
 	UpdateConfirm(context.Context, *UpdateConfirmRequest) (*UpdateConfirmResponse, error)
+	// RebootNode reboots the capsule immediately, no operator confirmation
+	// and no slot change — it comes back up on the same slot. The response
+	// is sent first, then the reboot is scheduled after a short delay so
+	// the client gets a clean reply before the kernel restarts. Operator
+	// escape hatch for wedged-node recovery (e.g. tmpfs exhaustion); not
+	// part of the A/B update flow.
+	RebootNode(context.Context, *RebootNodeRequest) (*RebootNodeResponse, error)
 	mustEmbedUnimplementedCapsuleServiceServer()
 }
 
@@ -160,6 +185,9 @@ func (UnimplementedCapsuleServiceServer) UpdateOS(grpc.ClientStreamingServer[Upd
 }
 func (UnimplementedCapsuleServiceServer) UpdateConfirm(context.Context, *UpdateConfirmRequest) (*UpdateConfirmResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateConfirm not implemented")
+}
+func (UnimplementedCapsuleServiceServer) RebootNode(context.Context, *RebootNodeRequest) (*RebootNodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RebootNode not implemented")
 }
 func (UnimplementedCapsuleServiceServer) mustEmbedUnimplementedCapsuleServiceServer() {}
 func (UnimplementedCapsuleServiceServer) testEmbeddedByValue()                        {}
@@ -236,6 +264,24 @@ func _CapsuleService_UpdateConfirm_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CapsuleService_RebootNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RebootNodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CapsuleServiceServer).RebootNode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CapsuleService_RebootNode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CapsuleServiceServer).RebootNode(ctx, req.(*RebootNodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CapsuleService_ServiceDesc is the grpc.ServiceDesc for CapsuleService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -250,6 +296,10 @@ var CapsuleService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateConfirm",
 			Handler:    _CapsuleService_UpdateConfirm_Handler,
+		},
+		{
+			MethodName: "RebootNode",
+			Handler:    _CapsuleService_RebootNode_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

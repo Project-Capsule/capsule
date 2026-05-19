@@ -213,6 +213,28 @@ func (c *CapsuleController) UpdateConfirm(ctx context.Context, _ *capsulev1.Upda
 	}, nil
 }
 
+// RebootNode reboots the capsule on the same slot. Like UpdateOS, it
+// returns the response first and reboots from a background goroutine
+// after a short delay, so the client gets a clean reply before the
+// kernel restarts (unix.Reboot never returns at PID 1).
+func (c *CapsuleController) RebootNode(_ context.Context, _ *capsulev1.RebootNodeRequest) (*capsulev1.RebootNodeResponse, error) {
+	if c.UpdateService == nil {
+		return nil, status.Error(codes.Unimplemented, "update service not configured")
+	}
+	delay := c.RebootDelay
+	if delay <= 0 {
+		delay = time.Second
+	}
+	go func() {
+		time.Sleep(delay)
+		if err := c.UpdateService.Reboot(); err != nil {
+			// At PID 1 this should not return; nothing useful to do.
+			_ = err
+		}
+	}()
+	return &capsulev1.RebootNodeResponse{Message: "reboot scheduled"}, nil
+}
+
 type unameInfo struct {
 	release string
 	version string

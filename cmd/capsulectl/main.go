@@ -92,6 +92,8 @@ func main() {
 	switch group + " " + cmd {
 	case "capsule info":
 		err = capsuleInfo(*addr)
+	case "capsule reboot":
+		err = capsuleReboot(*addr)
 	case "capsule update":
 		// "capsule update push <bundle> [--auto-confirm=N]" / "capsule update confirm"
 		if len(subArgs) < 1 {
@@ -322,6 +324,7 @@ Adoption + identity:
 Capsule:
   capsule info
   capsule logs [-f] [-n N]
+  capsule reboot                                       reboot the capsule (same slot)
   capsule update push <bundle.tar> [--auto-confirm=N]
   capsule update confirm
   capsule debug [-i <image>] [--keep] [-- <cmd> [args...]]
@@ -790,6 +793,23 @@ func capsuleUpdateConfirm(addr string) error {
 			return err
 		}
 		fmt.Printf("update committed: slot=%s version=%s\n", resp.CommittedSlot, resp.CommittedVersion)
+		return nil
+	})
+}
+
+func capsuleReboot(addr string) error {
+	conn, err := dial(addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	client := capsulev1.NewCapsuleServiceClient(conn)
+	return withCtx(func(ctx context.Context) error {
+		resp, err := client.RebootNode(ctx, &capsulev1.RebootNodeRequest{})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("capsule %s: %s — it will go down now; wait for it to come back\n", addr, resp.Message)
 		return nil
 	})
 }

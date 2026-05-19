@@ -26,6 +26,14 @@ service CapsuleService {
   // they've verified the new slot is healthy. Persists the GRUB default
   // selection and clears pending state.
   rpc UpdateConfirm(UpdateConfirmRequest) returns (UpdateConfirmResponse);
+
+  // RebootNode reboots the capsule immediately, no operator confirmation
+  // and no slot change — it comes back up on the same slot. The response
+  // is sent first, then the reboot is scheduled after a short delay so
+  // the client gets a clean reply before the kernel restarts. Operator
+  // escape hatch for wedged-node recovery (e.g. tmpfs exhaustion); not
+  // part of the A/B update flow.
+  rpc RebootNode(RebootNodeRequest) returns (RebootNodeResponse);
 }
 
 message GetInfoRequest {}
@@ -139,4 +147,11 @@ message UpdateConfirmResponse {
   string committed_slot = 1;
   // VERSION committed.
   string committed_version = 2;
+}
+
+message RebootNodeRequest {}
+
+message RebootNodeResponse {
+  // Human-readable confirmation (e.g. "reboot scheduled").
+  string message = 1;
 }

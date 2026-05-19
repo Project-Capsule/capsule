@@ -695,6 +695,87 @@ func (x *UpdateConfirmResponse) GetCommittedVersion() string {
 	return ""
 }
 
+type RebootNodeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RebootNodeRequest) Reset() {
+	*x = RebootNodeRequest{}
+	mi := &file_capsule_v1_capsule_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RebootNodeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RebootNodeRequest) ProtoMessage() {}
+
+func (x *RebootNodeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_capsule_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RebootNodeRequest.ProtoReflect.Descriptor instead.
+func (*RebootNodeRequest) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_capsule_proto_rawDescGZIP(), []int{9}
+}
+
+type RebootNodeResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Human-readable confirmation (e.g. "reboot scheduled").
+	Message       string `protobuf:"bytes,1,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RebootNodeResponse) Reset() {
+	*x = RebootNodeResponse{}
+	mi := &file_capsule_v1_capsule_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RebootNodeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RebootNodeResponse) ProtoMessage() {}
+
+func (x *RebootNodeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_capsule_v1_capsule_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RebootNodeResponse.ProtoReflect.Descriptor instead.
+func (*RebootNodeResponse) Descriptor() ([]byte, []int) {
+	return file_capsule_v1_capsule_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RebootNodeResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 var File_capsule_v1_capsule_proto protoreflect.FileDescriptor
 
 const file_capsule_v1_capsule_proto_rawDesc = "" +
@@ -749,13 +830,18 @@ const file_capsule_v1_capsule_proto_rawDesc = "" +
 	"\x14UpdateConfirmRequest\"k\n" +
 	"\x15UpdateConfirmResponse\x12%\n" +
 	"\x0ecommitted_slot\x18\x01 \x01(\tR\rcommittedSlot\x12+\n" +
-	"\x11committed_version\x18\x02 \x01(\tR\x10committedVersion2\xc0\x02\n" +
+	"\x11committed_version\x18\x02 \x01(\tR\x10committedVersion\"\x13\n" +
+	"\x11RebootNodeRequest\".\n" +
+	"\x12RebootNodeResponse\x12\x18\n" +
+	"\amessage\x18\x01 \x01(\tR\amessage2\x8d\x03\n" +
 	"\x0eCapsuleService\x12B\n" +
 	"\aGetInfo\x12\x1a.capsule.v1.GetInfoRequest\x1a\x1b.capsule.v1.GetInfoResponse\x12K\n" +
 	"\n" +
 	"StreamLogs\x12\x1e.capsule.v1.CapsuleLogsRequest\x1a\x1b.capsule.v1.CapsuleLogChunk0\x01\x12G\n" +
 	"\bUpdateOS\x12\x1b.capsule.v1.UpdateOSRequest\x1a\x1c.capsule.v1.UpdateOSResponse(\x01\x12T\n" +
-	"\rUpdateConfirm\x12 .capsule.v1.UpdateConfirmRequest\x1a!.capsule.v1.UpdateConfirmResponseB\xa5\x01\n" +
+	"\rUpdateConfirm\x12 .capsule.v1.UpdateConfirmRequest\x1a!.capsule.v1.UpdateConfirmResponse\x12K\n" +
+	"\n" +
+	"RebootNode\x12\x1d.capsule.v1.RebootNodeRequest\x1a\x1e.capsule.v1.RebootNodeResponseB\xa5\x01\n" +
 	"\x0ecom.capsule.v1B\fCapsuleProtoP\x01Z<github.com/geekgonecrazy/capsule/models/capsule/v1;capsulev1\xa2\x02\x03CXX\xaa\x02\n" +
 	"Capsule.V1\xca\x02\n" +
 	"Capsule\\V1\xe2\x02\x16Capsule\\V1\\GPBMetadata\xea\x02\vCapsule::V1b\x06proto3"
@@ -772,7 +858,7 @@ func file_capsule_v1_capsule_proto_rawDescGZIP() []byte {
 	return file_capsule_v1_capsule_proto_rawDescData
 }
 
-var file_capsule_v1_capsule_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_capsule_v1_capsule_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_capsule_v1_capsule_proto_goTypes = []any{
 	(*GetInfoRequest)(nil),        // 0: capsule.v1.GetInfoRequest
 	(*GetInfoResponse)(nil),       // 1: capsule.v1.GetInfoResponse
@@ -783,22 +869,26 @@ var file_capsule_v1_capsule_proto_goTypes = []any{
 	(*UpdateOSResponse)(nil),      // 6: capsule.v1.UpdateOSResponse
 	(*UpdateConfirmRequest)(nil),  // 7: capsule.v1.UpdateConfirmRequest
 	(*UpdateConfirmResponse)(nil), // 8: capsule.v1.UpdateConfirmResponse
+	(*RebootNodeRequest)(nil),     // 9: capsule.v1.RebootNodeRequest
+	(*RebootNodeResponse)(nil),    // 10: capsule.v1.RebootNodeResponse
 }
 var file_capsule_v1_capsule_proto_depIdxs = []int32{
-	5, // 0: capsule.v1.UpdateOSRequest.metadata:type_name -> capsule.v1.UpdateOSMetadata
-	0, // 1: capsule.v1.CapsuleService.GetInfo:input_type -> capsule.v1.GetInfoRequest
-	2, // 2: capsule.v1.CapsuleService.StreamLogs:input_type -> capsule.v1.CapsuleLogsRequest
-	4, // 3: capsule.v1.CapsuleService.UpdateOS:input_type -> capsule.v1.UpdateOSRequest
-	7, // 4: capsule.v1.CapsuleService.UpdateConfirm:input_type -> capsule.v1.UpdateConfirmRequest
-	1, // 5: capsule.v1.CapsuleService.GetInfo:output_type -> capsule.v1.GetInfoResponse
-	3, // 6: capsule.v1.CapsuleService.StreamLogs:output_type -> capsule.v1.CapsuleLogChunk
-	6, // 7: capsule.v1.CapsuleService.UpdateOS:output_type -> capsule.v1.UpdateOSResponse
-	8, // 8: capsule.v1.CapsuleService.UpdateConfirm:output_type -> capsule.v1.UpdateConfirmResponse
-	5, // [5:9] is the sub-list for method output_type
-	1, // [1:5] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	5,  // 0: capsule.v1.UpdateOSRequest.metadata:type_name -> capsule.v1.UpdateOSMetadata
+	0,  // 1: capsule.v1.CapsuleService.GetInfo:input_type -> capsule.v1.GetInfoRequest
+	2,  // 2: capsule.v1.CapsuleService.StreamLogs:input_type -> capsule.v1.CapsuleLogsRequest
+	4,  // 3: capsule.v1.CapsuleService.UpdateOS:input_type -> capsule.v1.UpdateOSRequest
+	7,  // 4: capsule.v1.CapsuleService.UpdateConfirm:input_type -> capsule.v1.UpdateConfirmRequest
+	9,  // 5: capsule.v1.CapsuleService.RebootNode:input_type -> capsule.v1.RebootNodeRequest
+	1,  // 6: capsule.v1.CapsuleService.GetInfo:output_type -> capsule.v1.GetInfoResponse
+	3,  // 7: capsule.v1.CapsuleService.StreamLogs:output_type -> capsule.v1.CapsuleLogChunk
+	6,  // 8: capsule.v1.CapsuleService.UpdateOS:output_type -> capsule.v1.UpdateOSResponse
+	8,  // 9: capsule.v1.CapsuleService.UpdateConfirm:output_type -> capsule.v1.UpdateConfirmResponse
+	10, // 10: capsule.v1.CapsuleService.RebootNode:output_type -> capsule.v1.RebootNodeResponse
+	6,  // [6:11] is the sub-list for method output_type
+	1,  // [1:6] is the sub-list for method input_type
+	1,  // [1:1] is the sub-list for extension type_name
+	1,  // [1:1] is the sub-list for extension extendee
+	0,  // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_capsule_v1_capsule_proto_init() }
@@ -816,7 +906,7 @@ func file_capsule_v1_capsule_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_capsule_v1_capsule_proto_rawDesc), len(file_capsule_v1_capsule_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
