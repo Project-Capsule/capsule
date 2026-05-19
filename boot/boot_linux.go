@@ -4,6 +4,8 @@ package boot
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -115,6 +117,16 @@ func initPlatform(ctx context.Context) (Result, error) {
 		res.MountPermErr = err.Error()
 	} else {
 		res.MountedPerm = true
+	}
+
+	// With /perm available, take a second DHCP pass that asks for our
+	// previously-leased address with a /perm-stable client-id, so the
+	// box keeps the same IP across A/B slot switches (the slot-switch
+	// outage is long enough that a blank DISCOVER routinely drifts onto
+	// a new lease). No-op until /perm is mounted; the early
+	// bringUpDefaultEth lease stands if this is skipped or fails.
+	if res.MountedPerm {
+		reclaimStickyIP()
 	}
 
 	// Hostname must come after mountPerm (so /perm/capsule/hostname is
@@ -553,6 +565,98 @@ func bringUpDefaultEth() error {
 	// update deadline can fire much later in real time than it should.
 	go syncTimeOnce()
 	return nil
+}
+
+// Sticky-IP state on /perm. /perm is the persistent LV; it survives A/B
+// OS updates, so anything keyed here is identical from either slot.
+const (
+	permNetDir       = "/perm/capsule"
+	permLastIPFile   = "/perm/capsule/last-ip"
+	permClientIDFile = "/perm/capsule/dhcp-clientid"
+	udhcpcScript     = "/usr/share/capsule/udhcpc.script"
+)
+
+// reclaimStickyIP runs a second udhcpc pass now that /perm is mounted.
+// It presents a /perm-persisted DHCP client identifier and, if we have
+// one, asks for the previously-leased address (DHCP option 50). Our
+// udhcpc.script writes the bound address back to /perm/capsule/last-ip.
+//
+// The whole point: a plain reboot is fast enough that the router still
+// has our lease and a blank DISCOVER gets the same IP back, but an A/B
+// slot switch (stream bundle → write inactive slot → flip GRUB → cold
+// boot) is offline long enough that the lease lapses and the box drifts
+// onto a new address. Pinning identity + requested-IP on /perm makes
+// the IP sticky across slots.
+//
+// Best-effort: the early bringUpDefaultEth() already obtained a working
+// lease with the trusted stock script. Any failure here logs and
+// returns, leaving that lease in place — never worse than before.
+func reclaimStickyIP() {
+	name, err := firstEthIface()
+	if err != nil {
+		slog.Warn("sticky IP: no ethernet interface; keeping early lease", "err", err)
+		return
+	}
+
+	args := []string{
+		"-i", name, "-q", "-n", "-t", "4", "-A", "2",
+		"-s", udhcpcScript,
+	}
+	if cid := ensureDHCPClientID(); cid != "" {
+		// Option 61 (client identifier), hex-encoded per udhcpc -x.
+		args = append(args, "-x", "0x3d:"+cid)
+	}
+	requested := ""
+	if b, err := os.ReadFile(permLastIPFile); err == nil {
+		if ip := strings.TrimSpace(string(b)); ip != "" {
+			requested = ip
+			args = append(args, "-r", ip)
+		}
+	}
+
+	out, err := exec.Command("/sbin/udhcpc", args...).CombinedOutput()
+	if err != nil {
+		slog.Warn("sticky IP: udhcpc pass failed; keeping early lease",
+			"err", err, "out", strings.TrimSpace(string(out)))
+		return
+	}
+	slog.Info("sticky IP reclaimed via /perm", "iface", name, "requested", requested)
+}
+
+// ensureDHCPClientID returns a stable hex client-identifier persisted on
+// /perm, generating one on first call. Format: a 0x00 ("opaque") type
+// byte + 8 random bytes — independent of MAC and of which slot booted,
+// so the DHCP server keys our lease the same way every time. Returns ""
+// on any failure (caller then just omits -x and relies on udhcpc's
+// MAC-derived default, same as before).
+func ensureDHCPClientID() string {
+	if b, err := os.ReadFile(permClientIDFile); err == nil {
+		if s := strings.TrimSpace(string(b)); s != "" {
+			return s
+		}
+	}
+	if err := os.MkdirAll(permNetDir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		slog.Warn("sticky IP: cannot create /perm net dir", "err", err)
+		return ""
+	}
+	raw := make([]byte, 9)
+	raw[0] = 0x00 // RFC 2132 client-id type 0: opaque, not a hardware addr.
+	if _, err := rand.Read(raw[1:]); err != nil {
+		slog.Warn("sticky IP: client-id entropy read failed", "err", err)
+		return ""
+	}
+	s := hex.EncodeToString(raw)
+	tmp := permClientIDFile + ".tmp"
+	if err := os.WriteFile(tmp, []byte(s+"\n"), 0o644); err != nil {
+		slog.Warn("sticky IP: cannot persist client-id", "err", err)
+		return ""
+	}
+	if err := os.Rename(tmp, permClientIDFile); err != nil {
+		slog.Warn("sticky IP: cannot commit client-id", "err", err)
+		_ = os.Remove(tmp)
+		return ""
+	}
+	return s
 }
 
 // syncTimeOnce runs busybox ntpd in -q mode (quit after first sync) against

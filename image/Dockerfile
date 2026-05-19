@@ -91,6 +91,11 @@ RUN set -eux; \
 RUN rm -rf /var/cache/apk /usr/share/doc /usr/share/man /usr/share/locale \
            /usr/share/info /etc/ssh
 COPY image/etc/ /etc/
+# Sticky-IP udhcpc handler. capsuled's reclaimStickyIP() runs a second,
+# /perm-backed DHCP pass with `udhcpc -s` pointed here so the box keeps
+# the same address across A/B slot switches. See boot/boot_linux.go.
+COPY image/udhcpc.script /usr/share/capsule/udhcpc.script
+RUN chmod 0755 /usr/share/capsule/udhcpc.script
 RUN mkdir -p /run/cni/ipam /opt/cni
 # Pre-create /perm and runtime state dirs so capsuled can mount onto them
 # even when rootfs is read-only.

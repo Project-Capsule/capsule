@@ -1,0 +1,64 @@
+#!/bin/sh
+# Capsule udhcpc handler. Replaces the stock
+# /usr/share/udhcpc/default.script (boot/boot_linux.go passes this via
+# `udhcpc -s` on the second, /perm-backed DHCP pass — see
+# reclaimStickyIP). It does two jobs:
+#
+#   1. Configure the interface from the lease (same ifconfig/route the
+#      canonical busybox default script does — DNS is intentionally not
+#      written: the rootfs is a read-only squashfs and ships a static
+#      /etc/resolv.conf).
+#   2. Persist the leased address to /perm/capsule/last-ip so the next
+#      boot can ask for it back (`udhcpc -r`). /perm survives A/B slot
+#      switches, so the box reclaims the same IP across an OS update
+#      instead of drifting onto whatever the router hands out after the
+#      longer slot-switch outage.
+#
+# Best-effort by contract: the early bringUpDefaultEth() pass already
+# obtained a working lease with the trusted stock script, so anything
+# that goes wrong here only ever leaves us on that earlier lease.
+set -u
+
+PERM_DIR=/perm/capsule
+PERM_IP="$PERM_DIR/last-ip"
+
+# Absolute paths: udhcpc execs the script with a minimal PATH.
+# /sbin/ifconfig is the busybox applet; /sbin/ip is iproute2 (in the
+# rootfs image — used for `route replace`, which busybox `route` lacks).
+IFCONFIG=/sbin/ifconfig
+IP=/sbin/ip
+
+case "${1:-}" in
+deconfig)
+	# Deliberately NON-destructive. udhcpc runs `deconfig` at startup
+	# before it tries to bind. This is the second, /perm-backed pass;
+	# the early bringUpDefaultEth() lease is our fallback, so we must
+	# NOT flush it here — if this pass fails to get a lease (-n), the
+	# earlier address has to survive. A successful `bound` replaces the
+	# address explicitly anyway. Just make sure the link is up.
+	"$IFCONFIG" "$interface" up 2>/dev/null
+	;;
+bound | renew)
+	"$IFCONFIG" "$interface" "$ip" \
+		netmask "${subnet:-255.255.255.0}" \
+		broadcast "${broadcast:-+}"
+	if [ -n "${router:-}" ]; then
+		# `replace` is idempotent: creates the default route or updates
+		# it in place, so the phase-1 → phase-2 handoff needs no fragile
+		# del-then-add (and busybox `route` won't take `del ... dev`).
+		for r in $router; do
+			"$IP" route replace default via "$r" dev "$interface" 2>/dev/null && break
+		done
+	fi
+	# Sticky-IP persistence. Guarded on the dir existing so the early
+	# pre-/perm DHCP pass (no /perm yet) simply skips it. Atomic
+	# rename so a crash mid-write can't leave a truncated address.
+	if [ -d "$PERM_DIR" ]; then
+		if printf '%s\n' "$ip" >"$PERM_IP.tmp" 2>/dev/null; then
+			mv "$PERM_IP.tmp" "$PERM_IP" 2>/dev/null || rm -f "$PERM_IP.tmp"
+		fi
+	fi
+	;;
+leasefail | nak) ;;
+esac
+exit 0
