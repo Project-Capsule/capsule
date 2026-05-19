@@ -23,7 +23,7 @@ CAPSULE_VERSION="${CAPSULE_VERSION:-$(date +%Y%m%d-%H%M%S)}"
 # Bump this when Alpine deletes the current version from their mirror;
 # verify the new version exists at:
 #   https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/
-LINUX_LTS_VERSION="${LINUX_LTS_VERSION:-6.18.29-r0}"
+LINUX_LTS_VERSION="${LINUX_LTS_VERSION:-6.18.31-r0}"
 
 mkdir -p "$BUILD_DIR"
 
