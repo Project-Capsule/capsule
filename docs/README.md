@@ -27,6 +27,7 @@ This folder is the operator's manual.
 - **[fabric.md](fabric.md)** — A WireGuard mesh between capsules: fabric IPs for containers and microVMs in `100.64.0.0/10`, declarative per-workload allow-list policy, default-deny. Operator-driven enrollment, no central control plane. Status: proposal.
 - **[edge.md](edge.md)** — Exposing fabric workloads to the public internet: an edge capsule with a public IP runs a managed Caddy, terminates TLS, routes into the fabric. Direct DNS or behind a cloud LB / CDN. ACME auto + DNS-01 + manual cert modes. Status: proposal. Builds on the fabric proposal. 
 - **[live-migration.md](live-migration.md)** — Live migration between capsules for containers and microVMs: host CRIU for containers, guest-CRIU baseline for microVM payloads, backend snapshot fast path, and LVM-thin snapshot/delta volume transfer. Status: proposal.
+- **[web-ui.md](web-ui.md)** — A browser console for a fleet of capsules: a standalone `capsule-console` (never part of `capsuled`) carrying a grpc-gateway JSON transcoder, multi-capsule fan-out, its own user identity/RBAC + audit, and custody of per-capsule operator keys. Includes wireframes. Status: proposal.
 
 ## Vocabulary
 
