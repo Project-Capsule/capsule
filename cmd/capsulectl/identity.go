@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -87,15 +86,12 @@ func runAdopt(addr string, args []string) error {
 		}
 	}
 
-	dir, err := configDir()
+	keyPath, err := operatorKeyPath()
 	if err != nil {
 		return err
 	}
-	keyPath := filepath.Join(dir, "keys", ctxName+".ed25519")
 
-	// Reuse an existing key from a previous failed adopt attempt rather than
-	// refusing to overwrite it. This lets the operator retry after pre-enrollment
-	// without losing their key or needing a different context name.
+	// Generate the operator key once; reuse it for every capsule on this machine.
 	var priv ed25519.PrivateKey
 	if _, statErr := os.Stat(keyPath); statErr == nil {
 		priv, err = loadPrivateKey(keyPath)
@@ -114,7 +110,6 @@ func runAdopt(addr string, args []string) error {
 	// MITM with a different cert can't even establish the connection.
 	conn, err := dialPinnedForAdopt(target, wireFingerprint)
 	if err != nil {
-		_ = os.Remove(keyPath)
 		return fmt.Errorf("dial %s: %w", target, err)
 	}
 	defer conn.Close()
@@ -127,22 +122,16 @@ func runAdopt(addr string, args []string) error {
 	})
 	if err != nil {
 		if isClaimWindowClosed(err) {
-			// Keep the key — the operator needs to share the pubkey with an
-			// enrolled peer, then re-run adopt once it's been added via key add.
+			// Print the pubkey so the operator can share it for pre-enrollment.
 			der, _ := x509.MarshalPKIXPublicKey(pub)
 			pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
 			pubPath := keyPath + ".pub"
-			if writeErr := os.WriteFile(pubPath, pubPEM, 0o644); writeErr == nil {
-				fmt.Fprintf(os.Stderr, "\n  Claim window closed. Your key has been saved:\n")
-				fmt.Fprintf(os.Stderr, "    private : %s\n", keyPath)
-				fmt.Fprintf(os.Stderr, "    public  : %s\n\n", pubPath)
-				fmt.Fprintf(os.Stderr, "  Have an enrolled operator add it:\n")
-				fmt.Fprintf(os.Stderr, "    capsulectl --capsule %s key add --name <label> %s\n\n", target, pubPath)
-				fmt.Fprintf(os.Stderr, "  Then re-run this command.\n\n")
-			}
+			_ = os.WriteFile(pubPath, pubPEM, 0o644)
+			fmt.Fprintf(os.Stderr, "\n  Claim window closed. Have an enrolled operator run:\n")
+			fmt.Fprintf(os.Stderr, "    capsulectl --capsule %s key add --name <label> %s\n\n", target, pubPath)
+			fmt.Fprintf(os.Stderr, "  Then re-run this command.\n\n")
 			return fmt.Errorf("adopt: %w", err)
 		}
-		_ = os.Remove(keyPath)
 		return fmt.Errorf("adopt rpc: %w", err)
 	}
 
@@ -159,7 +148,7 @@ func runAdopt(addr string, args []string) error {
 		Addr:           target,
 		CapsuleID:      resp.GetCapsuleId(),
 		TLSFingerprint: wireFingerprint,
-		KeyPath:        keyPath,
+		KeyPath:        keyPath, // operator key — same path for all contexts on this machine
 	}
 	cfg.Current = ctxName
 	if err := cfg.Save(); err != nil {
@@ -257,19 +246,18 @@ func runKeyRemove(addr, kid string) error {
 	return nil
 }
 
-// runKeyShow prints the local context's pubkey + kid in PEM and raw
-// hex form so the operator can hand them to someone else for enrollment.
-func runKeyShow(addr string) error {
-	cfg, err := loadConfig()
+// runKeyShow prints this machine's operator pubkey + kid so it can be
+// shared with an enrolled peer for pre-enrollment via key add.
+func runKeyShow(_ string) error {
+	keyPath, err := operatorKeyPath()
 	if err != nil {
 		return err
 	}
-	cctx, err := cfg.Resolve(addr)
+	priv, err := loadPrivateKey(keyPath)
 	if err != nil {
-		return fmt.Errorf("no context found for %q (run: capsulectl adopt --capsule <addr>)", addr)
-	}
-	priv, err := loadPrivateKey(cctx.KeyPath)
-	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no operator key yet — run: capsulectl adopt --capsule <addr>")
+		}
 		return err
 	}
 	pub := priv.Public().(ed25519.PublicKey)
@@ -323,8 +311,7 @@ func runContextRemove(name string) error {
 	if err != nil {
 		return err
 	}
-	c, ok := cfg.Contexts[name]
-	if !ok {
+	if _, ok := cfg.Contexts[name]; !ok {
 		return fmt.Errorf("no such context: %s", name)
 	}
 	delete(cfg.Contexts, name)
@@ -334,9 +321,7 @@ func runContextRemove(name string) error {
 	if err := cfg.Save(); err != nil {
 		return err
 	}
-	// Best-effort key removal: the operator may want to keep the key.
-	// We leave it on disk and just point them at it.
-	fmt.Printf("removed context %q (key file %s left on disk)\n", name, c.KeyPath)
+	fmt.Printf("removed context %q\n", name)
 	return nil
 }
 

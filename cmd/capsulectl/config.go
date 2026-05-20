@@ -25,6 +25,16 @@ type Config struct {
 	Contexts map[string]Context `json:"contexts" yaml:"contexts"`
 }
 
+// operatorKeyPath returns the single Ed25519 key for this machine.
+// All capsule contexts on the same laptop share this identity.
+func operatorKeyPath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "operator.ed25519"), nil
+}
+
 func configDir() (string, error) {
 	if v := os.Getenv("CAPSULE_CONFIG_DIR"); v != "" {
 		return v, nil
