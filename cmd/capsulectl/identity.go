@@ -12,6 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/geekgonecrazy/capsule/auth"
 	capsulev1 "github.com/geekgonecrazy/capsule/models/capsule/v1"
 )
@@ -89,9 +92,21 @@ func runAdopt(addr string, args []string) error {
 		return err
 	}
 	keyPath := filepath.Join(dir, "keys", ctxName+".ed25519")
-	priv, err := generatePrivateKey(keyPath)
-	if err != nil {
-		return err
+
+	// Reuse an existing key from a previous failed adopt attempt rather than
+	// refusing to overwrite it. This lets the operator retry after pre-enrollment
+	// without losing their key or needing a different context name.
+	var priv ed25519.PrivateKey
+	if _, statErr := os.Stat(keyPath); statErr == nil {
+		priv, err = loadPrivateKey(keyPath)
+		if err != nil {
+			return err
+		}
+	} else {
+		priv, err = generatePrivateKey(keyPath)
+		if err != nil {
+			return err
+		}
 	}
 	pub := priv.Public().(ed25519.PublicKey)
 
@@ -111,6 +126,22 @@ func runAdopt(addr string, args []string) error {
 		Name:   ctxName,
 	})
 	if err != nil {
+		if isClaimWindowClosed(err) {
+			// Keep the key — the operator needs to share the pubkey with an
+			// enrolled peer, then re-run adopt once it's been added via key add.
+			der, _ := x509.MarshalPKIXPublicKey(pub)
+			pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+			pubPath := keyPath + ".pub"
+			if writeErr := os.WriteFile(pubPath, pubPEM, 0o644); writeErr == nil {
+				fmt.Fprintf(os.Stderr, "\n  Claim window closed. Your key has been saved:\n")
+				fmt.Fprintf(os.Stderr, "    private : %s\n", keyPath)
+				fmt.Fprintf(os.Stderr, "    public  : %s\n\n", pubPath)
+				fmt.Fprintf(os.Stderr, "  Have an enrolled operator add it:\n")
+				fmt.Fprintf(os.Stderr, "    capsulectl --capsule %s key add --name <label> %s\n\n", target, pubPath)
+				fmt.Fprintf(os.Stderr, "  Then re-run this command.\n\n")
+			}
+			return fmt.Errorf("adopt: %w", err)
+		}
 		_ = os.Remove(keyPath)
 		return fmt.Errorf("adopt rpc: %w", err)
 	}
@@ -307,6 +338,11 @@ func runContextRemove(name string) error {
 	// We leave it on disk and just point them at it.
 	fmt.Printf("removed context %q (key file %s left on disk)\n", name, c.KeyPath)
 	return nil
+}
+
+func isClaimWindowClosed(err error) bool {
+	s, ok := status.FromError(err)
+	return ok && s.Code() == codes.FailedPrecondition && strings.Contains(s.Message(), "adoption window closed")
 }
 
 // readPublicKey accepts a PEM-encoded SubjectPublicKeyInfo (output of

@@ -159,7 +159,7 @@ func main() {
 	var stateBroken bool
 	var stateErr string
 	switch {
-	case isPID1 && bootResult.ActiveSlot != "" && !bootResult.MountedPerm:
+	case isPID1 && bootResult.ActiveSlot != "" && !bootResult.MountedPerm && !bootResult.InstallerMode:
 		// Real A/B install with /perm mount failure. The error from
 		// mountPerm is captured in bootResult.MountPermErr.
 		slog.Error("/perm mount failed on A/B install — refusing to open claim window", "err", bootResult.MountPermErr)

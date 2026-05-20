@@ -23,7 +23,7 @@ FROM alpine:3.23 AS rootfs
 # (dm_mod, NIC drivers, KVM, …), which manifests at boot as "/perm
 # mount failed: /dev/mapper/control: No such device" and a dead NIC.
 # Keep this in lockstep with Dockerfile.packer's LINUX_LTS_VERSION.
-ARG LINUX_LTS_VERSION=6.18.31-r0
+ARG LINUX_LTS_VERSION=6.18.32-r0
 RUN apk add --no-cache \
       iproute2 \
       iptables \

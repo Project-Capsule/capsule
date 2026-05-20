@@ -149,6 +149,15 @@ func (i *Installer) Run(ctx context.Context, req Request, fn ProgressFn) (*Resul
 	if err := CopyPartition(usbBoot, 0, tgtBoot, 0, layout.BootSectors, copyProgress(fn, "write_boot")); err != nil {
 		return nil, fmt.Errorf("copy boot: %w", err)
 	}
+	// The USB installer's grub.cfg references PARTUUID=b005ab1e (installer
+	// disk sig). The NVMe was just stamped with b1a570ff (runtime sig), so
+	// the copied grub.cfg would cause a boot failure. Patch it, and also
+	// seed vmlinuz_b + initramfs_b — the installer image only carries slot_a.
+	fn("patch_boot", 0, "patching grub.cfg for runtime disk + seeding slot_b kernel")
+	if err := patchBootGrubCfg(tgtBoot); err != nil {
+		return nil, fmt.Errorf("patch boot: %w", err)
+	}
+	fn("patch_boot", 100, "grub.cfg patched")
 
 	// --- write_slot_a ---
 	if err := waitForPath(tgtSlotA, 5*time.Second); err != nil {
@@ -288,13 +297,15 @@ func writeFirstBootBundle(bundle *FirstBootBundle) error {
 	if err := os.MkdirAll(mountTarget, 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", mountTarget, err)
 	}
-	// The VG name "capsule" is shared with the installer's own VG. We
-	// rely on vgchange -ay activating both on the same machine without
-	// conflict — LVM keys VGs by uuid, not by name. The /dev/capsule/
-	// path here will resolve to the most recently activated one
-	// (target), which is what we want immediately after pvcreate.
-	if err := exec.Command("/bin/mount", "/dev/capsule/meta", mountTarget).Run(); err != nil {
-		return fmt.Errorf("mount target /perm: %w", err)
+	// Load ext4 module explicitly — in installer mode mountPerm() is skipped,
+	// so ext4 is never loaded. Without -t ext4 busybox mount reads
+	// /proc/filesystems, doesn't see ext4, and returns EINVAL.
+	_ = exec.Command("/sbin/modprobe", "ext4").Run()
+
+	// Use the kernel device-mapper path — kernel-created, no udev dependency.
+	const metaDM = "/dev/mapper/capsule-meta"
+	if out, err := exec.Command("/bin/mount", "-t", "ext4", metaDM, mountTarget).CombinedOutput(); err != nil {
+		return fmt.Errorf("mount %s: %w: %s", metaDM, err, strings.TrimSpace(string(out)))
 	}
 	defer func() {
 		_ = exec.Command("/bin/umount", mountTarget).Run()
@@ -329,25 +340,54 @@ func writeFirstBootBundle(bundle *FirstBootBundle) error {
 // "capsule" mounted at /perm (the in-memory store fallback covers the
 // edge case where the USB's PERM is uninitialized). The pvcreate path
 // here may surface a UUID warning; -ff -y forces past it.
+// writeLVMLocalConf writes /etc/lvm/lvmlocal.conf to disable udev sync for
+// the installer session. udev is not running in the installer boot env, so
+// without this LVM activates LVs in device-mapper but skips creating
+// /dev/<vg>/<lv> symlinks (those are normally handled by udev rules).
+func writeLVMLocalConf() error {
+	const conf = "activation {\n\tudev_sync = 0\n\tudev_rules = 0\n}\n"
+	return os.WriteFile("/etc/lvm/lvmlocal.conf", []byte(conf), 0644)
+}
+
 func initTargetLVM(permDev string) error {
-	steps := [][]string{
-		{"/sbin/pvcreate", "-ff", "-y", permDev},
-		{"/sbin/vgcreate", "capsule-target", permDev},
-		// Use a fixed 1 GiB meta LV on the target. The disk-booted
-		// capsule's mountPerm will rename / resize as needed on first
-		// boot if we ever want a different sizing rule.
-		{"/sbin/lvcreate", "-L", "1024M", "-n", "meta", "capsule-target"},
-		{"/usr/sbin/mkfs.ext4", "-q", "-F", "-L", "PERM", "/dev/capsule-target/meta"},
-		// Rename VG to "capsule" so the disk-booted capsule finds it
-		// under the expected name. Done last so the installer can
-		// have its own "capsule" VG active concurrently.
-		{"/sbin/vgrename", "capsule-target", "capsule"},
+	if err := writeLVMLocalConf(); err != nil {
+		return fmt.Errorf("lvm local conf: %w", err)
 	}
-	for _, s := range steps {
-		out, err := exec.Command(s[0], s[1:]...).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("%s: %w: %s", strings.Join(s, " "), err, strings.TrimSpace(string(out)))
+
+	// Best-effort teardown of any leftover state from a previous failed install.
+	_ = exec.Command("/sbin/vgchange", "-an", "capsule-target").Run()
+	_ = exec.Command("/sbin/vgchange", "-an", "capsule").Run()
+	_ = exec.Command("/sbin/vgremove", "-f", "-y", "capsule-target").Run()
+	_ = exec.Command("/sbin/vgremove", "-f", "-y", "capsule").Run()
+	_ = exec.Command("/sbin/pvremove", "-ff", "-y", permDev).Run()
+
+	// Zero the first 16 MiB to destroy stale filesystem/LVM signatures.
+	if out, err := exec.Command("/bin/dd",
+		"if=/dev/zero", "of="+permDev, "bs=1M", "count=16", "conv=fsync",
+	).CombinedOutput(); err != nil {
+		return fmt.Errorf("zero %s: %w: %s", permDev, err, strings.TrimSpace(string(out)))
+	}
+
+	// Create VG directly as "capsule" — no rename needed because the installer
+	// image has no PERM partition and therefore no competing "capsule" VG.
+	for _, cmd := range [][]string{
+		{"/sbin/pvcreate", "-ff", "-y", permDev},
+		{"/sbin/vgcreate", "capsule", permDev},
+		// Fixed 1 GiB meta LV; first runtime boot resizes as needed.
+		{"/sbin/lvcreate", "-L", "1024M", "-n", "meta", "capsule"},
+	} {
+		if out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s: %w: %s", strings.Join(cmd, " "), err, strings.TrimSpace(string(out)))
 		}
+	}
+
+	// Use the kernel device-mapper path (/dev/mapper/capsule-meta) for mkfs
+	// — it is created directly by the kernel and doesn't depend on LVM
+	// symlinks or udev. The LVM symlink (/dev/capsule/meta) may lag behind
+	// depending on udev state.
+	const metaDM = "/dev/mapper/capsule-meta"
+	if out, err := exec.Command("/sbin/mkfs.ext4", "-q", "-F", "-L", "PERM", metaDM).CombinedOutput(); err != nil {
+		return fmt.Errorf("mkfs.ext4 %s: %w: %s", metaDM, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -407,6 +447,55 @@ func copyProgress(fn ProgressFn, phase string) func(done, total uint64) {
 		}
 		fn(phase, pct, fmt.Sprintf("%d / %d MiB", done/(1024*1024), total/(1024*1024)))
 	}
+}
+
+// patchBootGrubCfg mounts the target disk's FAT32 boot partition, seeds
+// vmlinuz_b + initramfs_b from the installer's slot_a copies, and writes a
+// runtime grub.cfg that references PARTUUID=b1a570ff (the runtime disk sig
+// stamped by WriteMBR) instead of the installer's b005ab1e sig.
+func patchBootGrubCfg(tgtBoot string) error {
+	const mnt = "/mnt/boot-target"
+	if err := os.MkdirAll(mnt, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", mnt, err)
+	}
+	if out, err := exec.Command("/bin/mount", "-t", "vfat", tgtBoot, mnt).CombinedOutput(); err != nil {
+		return fmt.Errorf("mount %s: %w: %s", tgtBoot, err, strings.TrimSpace(string(out)))
+	}
+	defer func() { _ = exec.Command("/bin/umount", mnt).Run() }()
+
+	// Installer boot partition only has vmlinuz_a + initramfs_a. Copy to b so
+	// the runtime grub menu can reference both slots.
+	for _, pair := range [][2]string{
+		{"vmlinuz_a", "vmlinuz_b"},
+		{"initramfs_a", "initramfs_b"},
+	} {
+		src := filepath.Join(mnt, pair[0])
+		dst := filepath.Join(mnt, pair[1])
+		if out, err := exec.Command("/bin/cp", src, dst).CombinedOutput(); err != nil {
+			return fmt.Errorf("seed %s: %w: %s", pair[1], err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	// Runtime grub.cfg: A/B menu, timeout=2, correct PARTUUIDs for b1a570ff.
+	const grubCfg = `set timeout=2
+set default=0
+
+menuentry "Capsule (slot_a)" {
+    linux /vmlinuz_a root=PARTUUID=b1a570ff-02 rootfstype=squashfs ro random.trust_cpu=on capsule.slot=a console=tty0 console=ttyS0,115200n8 panic=10
+    initrd /initramfs_a
+}
+
+menuentry "Capsule (slot_b)" {
+    linux /vmlinuz_b root=PARTUUID=b1a570ff-03 rootfstype=squashfs ro random.trust_cpu=on capsule.slot=b console=tty0 console=ttyS0,115200n8 panic=10
+    initrd /initramfs_b
+}
+`
+	cfgPath := filepath.Join(mnt, "EFI", "BOOT", "grub.cfg")
+	if err := os.WriteFile(cfgPath, []byte(grubCfg), 0o644); err != nil {
+		return fmt.Errorf("write grub.cfg: %w", err)
+	}
+	_ = exec.Command("/bin/sync").Run()
+	return nil
 }
 
 // fingerprintFromPEM parses a PEM cert blob and returns its SHA-256

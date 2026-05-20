@@ -43,29 +43,50 @@ type IdentityController struct {
 	MDNS *mdns.Announcer
 }
 
-// Adopt enrolls the caller's pubkey as the first authorized key.
-// Authentication is unnecessary (the interceptor confirmed the claim
-// window is open); we still re-check Claim.Open() to lose cleanly if
-// two Adopt calls race.
+// Adopt enrolls the caller's pubkey as the first authorized key, or
+// completes context setup for a key that was pre-enrolled via KeyAdd.
+//
+// Two paths:
+//  1. Claim window open  — bootstrap: add key, close window, record adoption.
+//  2. Claim window closed + key already enrolled — pre-enroll path: an
+//     existing operator ran `key add` to register this key, and now the new
+//     operator is calling adopt to set up their local context. No state is
+//     mutated; the response is identical so the client can't distinguish the
+//     two paths (and doesn't need to).
 func (c *IdentityController) Adopt(ctx context.Context, req *capsulev1.AdoptRequest) (*capsulev1.AdoptResponse, error) {
-	if !c.Claim.Open() {
-		return nil, status.Error(codes.FailedPrecondition, "adoption window closed")
-	}
 	pub, err := auth.ParsePubkey(req.GetPubkey())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	kid := auth.KidFromPubkey(pub)
+
+	if !c.Claim.Open() {
+		// Pre-enrolled path: allow if the key is already in the store.
+		if _, kerr := c.Keys.Get(ctx, kid); kerr != nil {
+			return nil, status.Error(codes.FailedPrecondition,
+				"adoption window closed; use an enrolled key, or trigger RESET_AUTH at the console")
+		}
+		id, err := c.Identity.Get(ctx)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "load identity: %v", err)
+		}
+		slog.Info("adopt: pre-enrolled key completed context setup", "kid", kid)
+		return &capsulev1.AdoptResponse{
+			CapsuleId:            id.CapsuleID,
+			Kid:                  kid,
+			TlsFingerprintSha256: c.TLSFingerprint,
+		}, nil
+	}
+
+	// Bootstrap path: claim window is open.
 	name := req.GetName()
 	if name == "" {
 		name = "operator"
 	}
-	kid := auth.KidFromPubkey(pub)
-
 	id, err := c.Identity.Get(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "load identity: %v", err)
 	}
-
 	if err := c.Keys.Add(ctx, &store.AuthorizedKey{
 		Kid:         kid,
 		Pubkey:      pub,
@@ -87,9 +108,6 @@ func (c *IdentityController) Adopt(ctx context.Context, req *capsulev1.AdoptRequ
 	}
 	c.Claim.Close()
 	slog.Info("capsule adopted", "kid", kid, "name", name, "capsule_id", id.CapsuleID)
-	// Best-effort: flip the mDNS adopted flag so `discover` reflects
-	// the change immediately. Failure here is non-fatal; the capsule is
-	// adopted regardless.
 	if c.MDNS != nil {
 		if err := c.MDNS.MarkAdopted(ctx); err != nil {
 			slog.Warn("mdns mark adopted failed", "err", err)

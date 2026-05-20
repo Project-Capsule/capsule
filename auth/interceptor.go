@@ -79,10 +79,8 @@ func KidFromContext(ctx context.Context) string {
 
 func (a *Authenticator) authorize(ctx context.Context, fullMethod string) (context.Context, error) {
 	if fullMethod == AdoptMethod {
-		if !a.Claim.Open() {
-			return nil, status.Error(codes.FailedPrecondition,
-				"adoption window closed; use an enrolled key, or trigger RESET_AUTH at the console")
-		}
+		// Pass through unconditionally — the controller handles the claim
+		// window check and the pre-enrolled key path (key pre-added via KeyAdd).
 		return ctx, nil
 	}
 	if a.InstallerMode {

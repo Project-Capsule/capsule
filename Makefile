@@ -3,7 +3,7 @@ BUILD_DIR := build
 DISK_IMAGE := $(BUILD_DIR)/disk.raw
 UPDATE_BUNDLE := $(BUILD_DIR)/update.tar
 
-.PHONY: all proto tools capsuled capsulectl image update-bundle qemu clean test
+.PHONY: all proto tools capsuled capsulectl image installer update-bundle qemu clean test
 
 all: image
 
@@ -31,6 +31,11 @@ test:
 # build/update.tar in a single pass.
 image:
 	bash image/build.sh
+
+# Build the installer image: single rootfs slot, no PERM partition, ~3 GiB
+# smaller than disk.raw. Writes build/installer.raw. Flash to USB with dd.
+installer:
+	INSTALLER_IMAGE=1 bash image/build.sh
 
 # Build only the streaming update bundle — skip disk.raw assembly. Use this
 # for iteration on a running capsule (push + reboot). Full-image build still

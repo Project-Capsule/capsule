@@ -39,12 +39,15 @@ type Result struct {
 }
 
 // TargetDisk is one candidate install destination — a non-removable
-// internal block device with no existing Capsule MBR signature.
+// internal block device.
 type TargetDisk struct {
 	// Path is the absolute /dev path ("/dev/nvme0n1", "/dev/sda").
 	Path string
 	// SizeBytes is the capacity from /sys/block/<name>/size * 512.
 	SizeBytes uint64
+	// Reinstall is true when the disk already has a Capsule MBR signature,
+	// meaning this is a reinstall over an existing (possibly broken) install.
+	Reinstall bool
 }
 
 // Init performs PID 1 setup. On non-Linux it is a no-op (allows the daemon

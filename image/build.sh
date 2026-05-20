@@ -23,7 +23,7 @@ CAPSULE_VERSION="${CAPSULE_VERSION:-$(date +%Y%m%d-%H%M%S)}"
 # Bump this when Alpine deletes the current version from their mirror;
 # verify the new version exists at:
 #   https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/
-LINUX_LTS_VERSION="${LINUX_LTS_VERSION:-6.18.31-r0}"
+LINUX_LTS_VERSION="${LINUX_LTS_VERSION:-6.18.32-r0}"
 
 mkdir -p "$BUILD_DIR"
 
@@ -58,12 +58,15 @@ docker run --rm \
   --platform=linux/amd64 \
   -v "$BUILD_DIR:/work" \
   -e "BUNDLE_ONLY=${BUNDLE_ONLY:-0}" \
+  -e "INSTALLER_IMAGE=${INSTALLER_IMAGE:-0}" \
   -e "CAPSULE_VERSION=${CAPSULE_VERSION}" \
   "$PACKER_TAG"
 
 echo "==> Done."
 if [ "${BUNDLE_ONLY:-0}" = "1" ]; then
   ls -lh "$BUILD_DIR/rootfs.sqsh" "$BUILD_DIR/update.tar"
+elif [ "${INSTALLER_IMAGE:-0}" = "1" ]; then
+  ls -lh "$BUILD_DIR/rootfs.sqsh" "$BUILD_DIR/installer.raw"
 else
   ls -lh "$BUILD_DIR/rootfs.sqsh" "$BUILD_DIR/update.tar" "$BUILD_DIR/disk.raw"
 fi

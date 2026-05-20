@@ -99,9 +99,9 @@ func initPlatform(ctx context.Context) (Result, error) {
 	}
 
 	// Installer mode detection. Decided BEFORE mounting /perm so the
-	// rest of capsuled can branch on it: installer mode mounts the
-	// USB's own (tiny, ephemeral) PERM partition but does not start
-	// containerd, the reconciler, etc.
+	// rest of capsuled can branch on it. Installer mode skips /perm
+	// entirely — the installer image has no persistent state and no
+	// LVM partition of its own.
 	if installer, targets := DetectInstallerMode(); installer {
 		res.InstallerMode = true
 		res.Targets = targets
@@ -112,11 +112,13 @@ func initPlatform(ctx context.Context) (Result, error) {
 		slog.Info("installer mode detected", "targets", paths)
 	}
 
-	if err := mountPerm(); err != nil {
-		slog.Error("failed to mount /perm", "err", err)
-		res.MountPermErr = err.Error()
-	} else {
-		res.MountedPerm = true
+	if !res.InstallerMode {
+		if err := mountPerm(); err != nil {
+			slog.Error("failed to mount /perm", "err", err)
+			res.MountPermErr = err.Error()
+		} else {
+			res.MountedPerm = true
+		}
 	}
 
 	// With /perm available, take a second DHCP pass that asks for our
